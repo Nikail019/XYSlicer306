@@ -54,7 +54,5 @@ int main(void) {
     PORTB |= (1 << PORTB6);
 
     while (1) {
-        // Main loop - you could add more code here
-        // For example, reset encoder_ticks and restart motor on condition
     }
 }
