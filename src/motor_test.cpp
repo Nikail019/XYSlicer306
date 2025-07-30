@@ -41,9 +41,6 @@ ISR(INT2_vect) {
     if (encoder_ticks >= 2064) {
         // Stop motor PWM by setting duty cycle to 0
         OCR3C = 0;
-
-        // Optionally disable interrupt if you don't want more counts
-        EIMSK &= ~(1 << INT2);
     }
 }
 
