@@ -13,8 +13,11 @@ volatile uint16_t encoder_ticks = 0;
 void setup() {
     cli(); // Disable interrupts during setup
 
-    // Motor direction pin PB6 (digital 12)
-    DDRB |= (1 << DDB6);
+    // // Motor direction pin PB6 (digital 12)
+    // DDRB |= (1 << DDB6);
+
+    // Motor direction pin PG5 (digital 4)
+    DDRG |= (1 << DDG5);
 
     // PWM pin PE5 (digital 3) output
     DDRE |= (1 << DDE5);
@@ -47,7 +50,7 @@ ISR(INT2_vect) {
 int main(void) {
     setup();
 
-    // Set motor direction pin high or low (example: high)
+    // Set motor direction pin high or low
     PORTB |= (1 << PORTB6);
 
     while (1) {
