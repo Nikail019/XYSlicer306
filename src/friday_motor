@@ -1,0 +1,56 @@
+#include <Arduino.h>
+#include <avr/interrupt.h>
+
+int M1 = 4;
+int E1 = 5;
+int M2 = 6;
+int E2 = 7;
+
+const int encoderA = 2; // INT0
+const int encoderB = 3; // Digital pin for channel B
+
+volatile int16_t Encoder = 0;  // Use signed int for up/down counting
+
+void MoveMotor(bool direction, int pwm) {
+  digitalWrite(M1, direction ? HIGH : LOW);
+  analogWrite(E1, pwm);
+}
+
+// ISR: Triggered on encoder A (INT0)
+void EncoderISR() {
+  // Check channel B to determine direction
+  if (digitalRead(encoderB)) {
+    Encoder++;  // Clockwise
+  } else {
+    Encoder--;  // Counter-clockwise
+  }
+}
+
+int main() {
+  init();  // Initialize Arduino framework (timers, etc.)
+
+  // === Serial ===
+  Serial.begin(9600);
+  while (!Serial);
+
+  // === Pin setup ===
+  pinMode(M1, OUTPUT);
+  pinMode(E1, OUTPUT);
+  pinMode(M2, OUTPUT);
+  pinMode(E2, OUTPUT);
+
+  pinMode(encoderA, INPUT);
+  pinMode(encoderB, INPUT);
+
+  attachInterrupt(digitalPinToInterrupt(encoderA), EncoderISR, RISING);  // or CHANGE for more resolution
+
+  // === Main loop ===
+  while (1) {
+    MoveMotor(true, 150);  // Motor on
+    Serial.print("Encoder count: ");
+    Serial.println(Encoder);
+    delay(200);
+  }
+
+  return 0;
+}
