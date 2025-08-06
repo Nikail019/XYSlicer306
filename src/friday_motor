@@ -1,55 +1,132 @@
 #include <Arduino.h>
 #include <avr/interrupt.h>
+#define Kp 5
 
-int M1 = 4;
-int E1 = 5;
-int M2 = 6;
-int E2 = 7;
+const int M1 = 4;  // Motor direction pin
+const int E1 = 5;  // Motor PWM pin
 
-const int encoderA = 2; // INT0
-const int encoderB = 3; // Digital pin for channel B
+const int encoderA = 2; // INT0 - Channel A
+const int encoderB = 3; // Digital - Channel B
 
-volatile int16_t Encoder = 0;  // Use signed int for up/down counting
+volatile int16_t encoderCount = 0;
 
-void MoveMotor(bool direction, int pwm) {
-  digitalWrite(M1, direction ? HIGH : LOW);
-  analogWrite(E1, pwm);
-}
-
-// ISR: Triggered on encoder A (INT0)
 void EncoderISR() {
-  // Check channel B to determine direction
   if (digitalRead(encoderB)) {
-    Encoder++;  // Clockwise
+    encoderCount++;
   } else {
-    Encoder--;  // Counter-clockwise
+    encoderCount--;
   }
 }
 
+void moveMotor(bool direction, int speed, int duration_ms) {
+  digitalWrite(M1, direction ? HIGH : LOW);  // Set motor direction
+  analogWrite(E1, speed);                    // Set motor speed
+  delay(duration_ms);                        // Run motor
+  analogWrite(E1, 0);                        // Stop motor
+}
+
+void moveToEncoderCount(bool direction, int speed, int targetDelta) {
+  int16_t startCount = encoderCount;  // Snapshot starting point
+
+  digitalWrite(M1, direction ? HIGH : LOW);  // Set direction
+  analogWrite(E1, speed);                    // Start motor
+
+  // Wait until the motor has moved the desired amount
+  if (!direction) {
+    while ((encoderCount - startCount) < targetDelta);
+  } else {
+    while ((startCount - encoderCount) < targetDelta);
+  }
+
+  analogWrite(E1, 0);  // Stop motor
+  Serial.print("3/7. Moved by: ");
+  Serial.println(encoderCount - startCount);
+}
+
+void Move(bool direction, int pwmVal) {
+  digitalWrite(M1, direction);
+  analogWrite(E1, constrain(pwmVal, 0, 255));
+}
+
+void moveMotorControl(int reference_position) {
+  int error;
+  int pwmOutput;
+  bool direction;
+
+  while (true) {
+    error = reference_position - encoderCount;
+
+    // Stop condition — very close to target
+    if (abs(error) < 2) {
+      analogWrite(E1, 0);  // Stop motor
+      break;
+    }
+
+    direction = error > 0;          // True if moving forward
+    pwmOutput = abs(error) * Kp;    // Apply proportional gain
+    pwmOutput = constrain(pwmOutput, 0, 255);  // Limit speed
+
+    Move(direction, pwmOutput);
+  }
+
+  Serial.print("Final encoder count: ");
+  Serial.println(encoderCount);
+}
+
+
+void Move(bool direction, int pwmVal) {
+  digitalWrite(M1, direction);
+  analogWrite(E1, constrain(pwmVal, 0, 255));
+}
+
+void moveMotorControl(int reference_position) {
+  int error;
+  int pwmOutput;
+  bool direction;
+
+  while (true) {
+    error = reference_position - encoderCount;
+
+    // Stop condition — very close to target
+    if (abs(error) < 2) {
+      analogWrite(E1, 0);  // Stop motor
+      break;
+    }
+
+    direction = error > 0;          // True if moving forward
+    pwmOutput = abs(error) * Kp;    // Apply proportional gain
+    pwmOutput = constrain(pwmOutput, 0, 255);  // Limit speed
+
+    Move(direction, pwmOutput);
+  }
+
+  Serial.print("Final encoder count: ");
+  Serial.println(encoderCount);
+}
+
 int main() {
-  init();  // Initialize Arduino framework (timers, etc.)
-
-  // === Serial ===
+  init();  // Initialize Arduino system
   Serial.begin(9600);
-  while (!Serial);
+  while (!Serial);  // Wait for Serial Monitor (optional)
 
-  // === Pin setup ===
+  // Setup motor pins
   pinMode(M1, OUTPUT);
   pinMode(E1, OUTPUT);
-  pinMode(M2, OUTPUT);
-  pinMode(E2, OUTPUT);
 
+  // Setup encoder pins
   pinMode(encoderA, INPUT);
   pinMode(encoderB, INPUT);
 
-  attachInterrupt(digitalPinToInterrupt(encoderA), EncoderISR, RISING);  // or CHANGE for more resolution
+  // Attach encoder interrupt
+  attachInterrupt(digitalPinToInterrupt(encoderA), EncoderISR, RISING);
 
-  // === Main loop ===
+  // Repeat test loop
   while (1) {
-    MoveMotor(true, 150);  // Motor on
-    Serial.print("Encoder count: ");
-    Serial.println(Encoder);
-    delay(200);
+    encoderCount = 0;
+    moveToEncoderCount(HIGH, 150, 2064);
+
+
+    delay(1000);  // Pause before repeating
   }
 
   return 0;

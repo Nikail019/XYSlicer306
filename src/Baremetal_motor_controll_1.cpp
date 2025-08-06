@@ -1,5 +1,7 @@
 #include <avr/io.h>
 
+volatile int8_t encoderCount = 0;
+
 int main(void) {
     // Set pin 4 (PG5) as output
     DDRG |= (1 << PG5);

@@ -9,16 +9,17 @@ volatile bool hit_top = false;
 volatile bool hit_right = false;
 volatile bool hit_left = false;
 volatile bool hit_bottom = false;
+volatile int E1 = 0; // Left
+volatile int E2 = 0; // Right
 
 
 
 int main(){
   cli();
-
+  Serial.begin(9600);
   //Timer Setup
 
   //timer counter 1 with prescaler of 1024
-
   TCCR1B |= (1 << CS12) | (1 << CS10); 
   TCCR1B = (1 << WGM12); //ctc mode
   OCR1A = 3125;
@@ -26,16 +27,10 @@ int main(){
   TCCR3B |= (1 << CS32) | (1 << CS30);
   TCCR3B |= (1 << WGM32); // ctc mode
   OCR3A = 3125;
-  
+
   TIMSK1 |= (1 << OCIE1A); //ISR on Compare Match
   TIMSK3 |= (1 << OCIE3A); 
 
-  // // LIMIT SWITCH SETUP
-  // //  TOP, RIGHT, LEFT, BOTTOM == D21, D20, D19, 18
-  // DDRD &= ~((1 << PD0 ) | (1 << PD1) | (1 << PD2) | (1 << PD3));
-  // //enable interrup on those pins on rising edge
-  // EIMSK |= (1 << INT0) | (1 << INT1) | (1 << INT2) | (1 << INT3);
-  // EICRA |= 0xFF; //ALL ARE HIGH FOR RISING EDGE 
   
   // LIMIT SWITCH INTERRUPT SETUP
   //  TOP, RIGHT, LEFT, BOTTOM == D21, D20, D19, D18
@@ -46,14 +41,14 @@ int main(){
   
   // ENCODER INTERRUPT SETUP
   // LEFT MOTOR (A1, B1), RIGHT MOTOR (A2, B2)
-  attatchInterrupt(digitalPinToInterrupt(2), EncoderA1, CHANGE);
+  attachInterrupt(digitalPinToInterrupt(2), EncoderA1, CHANGE);
   attachInterrupt(digitalPinToInterrupt(3), EncoderA2, CHANGE);
   
  // Pin Change Interrupts
-  //B1 -> D15, PJO, PCINT[10], B2 -> D69/A15, PK7, PCINT[23]
+  //B1 -> D14, PJO, PCINT[10], B2 -> D69/A15, PK7, PCINT[23]
   // B1 uses bit 1, B2 uses bit 2
   PCICR |= (1 << PCIE1) | (1 << PCIE2);
-  PCMSK1 |= ( 1 << PCINT1O); 
+  PCMSK1 |= ( 1 << PCINT10); 
   PCMSK2 |= ( 1 << PCINT23);
   
   sei();
@@ -66,82 +61,85 @@ int main(){
 
 ISR(PCINT1_vect){
  // Interrupt for Encoder channel B1 
+ E1++;
+  Serial.write("ENC B1: ");
+  Serial.write(E1);
+  Serial.write("/n");
+ 
 }
 
 ISR(PCINT2_vect){
   // Interrupt for Encoder channel B2
+  E2++;
+  Serial.write("ENC B2: ");
+  Serial.write(E2);
+  Serial.write("/n");
+}
+ 
+void EncoderA1() {
+  E1++;
+  Serial.write("ENC A1: ");
+  Serial.write(E1);
+  Serial.write("/n");
+}
+
+void EncoderA2() {
+  E2++;
+  Serial.write("ENC A2: ");
+  Serial.write(E2);
+  Serial.write("/n");
+  
 }
 
 void LimitTop(){
+  Serial.write("TOP \n");
   if (x_debounce_flag == 0){
     TCNT1 = 0;
     //method
+    // turn off motor
+    // set state to fault
     hit_top = true;
     x_debounce_flag = true;
   }
 }
 
 void LimitRight(){
+  Serial.write("RIGHT \n");
   if (x_debounce_flag == 0){
     TCNT1 = 0;
     //method
+    // turn off motor
+    // set state to fault
     hit_right = true;
     x_debounce_flag = true;
   }
 }
 
 void LimitLeft(){
+  Serial.write("LEFT \n");
   if (y_debounce_flag == 0){
     TCNT3 = 0;
     //method
+    // turn off motor
+    // set state to fault
     hit_left = true;
     y_debounce_flag = true;
   }
 }
 
 void LimitBottom(){
+  Serial.write("BOTTOM \n");
   if (y_debounce_flag == 0){
     TCNT3 = 0;
     //method
+    // turn off motor
+    // set state to fault
+    hit_bottom = true;
     y_debounce_flag = true;
   }
 }
 
-// //x direction limit switches (Timer 1)
-// ISR(INT0_vect){
-//   //Reset timer 1
-//   if (x_debounce_flag == 0){
-//     TCNT1 = 0;
-//     //method
-//     x_debounce_flag = true;
-//   }
 
-// }
-
-// ISR(INT1_vect){
-//   if (x_debounce_flag == 0){
-//     TCNT1 = 0;
-//     //method
-//     x_debounce_flag = true;
-//   }
-// }
-// // y direction limit switches (timer 3)
-// ISR(INT2_vect){
-//     if (y_debounce_flag == 0){
-//     TCNT3 = 0;
-//     //method
-//     x_debounce_flag = true;
-//   }
-// }
-
-// ISR(INT3_vect){
-//   if (y_debounce_flag == 0){
-//     TCNT3 = 0;
-//     //method
-//     y_debounce_flag = true;
-//   }
-
-// }
 
 ISR(TIMER1_COMPA_vect){
   x_debounce_flag = false;
