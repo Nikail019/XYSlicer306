@@ -1,6 +1,7 @@
 #include <avr/io.h>
 
-volatile int8_t encoderCount = 0;
+volatile int8_t top_value = 0;
+
 
 int main(void) {
     // Set pin 4 (PG5) as output
@@ -33,5 +34,11 @@ int main(void) {
 }
     ISR(TIMER2_COMPA_vect) {
     // Called every 1 ms
+        top_value += 5;
+        if (top_value >= 255) {
+             top_value = 0;
+    }
+        
+
     
 }

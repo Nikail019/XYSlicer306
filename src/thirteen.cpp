@@ -6,7 +6,7 @@
 // Left motor + encoder
 const int LM_DIR     = 4;
 const int LM_PWM     = 5;
-const int encoderA_L = 21;  // interrupt pin (SCL)
+const int encoderA_L = 21;  // interrupt pin 
 const int encoderB_L = 14;  // digital pin
 
 // Right motor + encoder (swapped)
@@ -19,14 +19,6 @@ const int encoderB_R = 15;  // digital pin
 volatile int16_t encoderCountL = 0;
 volatile int16_t encoderCountR = 0;
 
-// === Disable I2C/TWI so pins 20/21 don't have pull-ups ===
-static inline void disableTWI() {
-  TWCR &= ~(1 << TWEN);
-  pinMode(20, INPUT);
-  pinMode(21, INPUT);
-  digitalWrite(20, LOW);
-  digitalWrite(21, LOW);
-}
 
 // === ENCODER ISRs ===
 void EncoderISR_L() {
@@ -35,47 +27,114 @@ void EncoderISR_L() {
 }
 
 void EncoderISR_R() {
-  if (digitalRead(encoderB_R)) encoderCountR++;
+  if (digitalRead(encoderB_R)) encoderCountR++; //invert the encoder reading to correspond CW as increasing encoder counts
   else                         encoderCountR--;
 }
 
-// === MOVE RIGHT BY ENCODER COUNT ===
-// direction: HIGH = clockwise (+encoder counts), LOW = anticlockwise (-encoder counts)
-// speed: 0..255
-// counts: positive number of ticks to move from CURRENT position
-void moveRightToEncoderCount(bool direction, int speed, int counts) {
-  if (counts < 0) counts = -counts;           // ensure positive magnitude
-  speed = constrain(speed, 0, 255);
+void MoveLeft(bool dir, int speed) {
+  digitalWrite(LM_DIR, dir);
+  analogWrite(LM_PWM, speed);
+  for (int i = 0; i < 10; i++) {
+    Serial.print("Encoder Count L: ");
+    Serial.println(encoderCountL);
+    delay(100); // Move for 1 second
+  }
+  analogWrite(LM_PWM, 0); // Stop
+}
 
-  // Set direction and start
-  digitalWrite(RM_DIR, direction ? HIGH : LOW);
-  int16_t start = encoderCountR;
+void MoveRight(bool dir, int speed) {
+  digitalWrite(RM_DIR, dir);
+  analogWrite(RM_PWM, speed);
+  for (int i = 0; i < 10; i++) {
+    Serial.print("Encoder Count R: ");
+    Serial.println(encoderCountR);
+    delay(100); // Move for 1 second
+  }
+  analogWrite(RM_PWM, 0); // Stop
+}
 
-  if (direction == HIGH) {
-    // target is higher than start
-    int16_t target = start + counts;
-    analogWrite(RM_PWM, speed);
-    while (encoderCountR < target) {
-      Serial.print("Encoder Count R: ");
+void MoveLeftAbsoluteEncoder(int16_t targetCount, int speed) {
+  int stopCount = 0;
+  Serial.print("Target Count: ");
+  Serial.println(targetCount);
+
+  if (targetCount > 0){
+    //Current Left encoder count plus target is our new stopping count
+    stopCount = targetCount + encoderCountL;
+
+    //intiate motor movement at our speed
+    digitalWrite(LM_DIR, false); //cw
+    analogWrite(LM_PWM, speed);
+    while (encoderCountL < stopCount){
+      //wait until we reach or exceed desired encoder count
     }
-  } else {
-    // target is lower than start
-    int16_t target = start - counts;
-    analogWrite(RM_PWM, speed);
-    while (encoderCountR > target) {
-      Serial.print("Encoder Count R: ");
-    }
+    analogWrite(LM_PWM, 0);
   }
 
-  // stop motor
-  analogWrite(RM_PWM, 0);
+  Serial.print("Target Count: ");
+  Serial.println(targetCount);
+  if (targetCount < 0){
+    //Current Left encoder count minus target is our new stopping count
+    stopCount = encoderCountL - targetCount;
+    Serial.print("Lenc Count: ");
+    Serial.println(encoderCountL);
+    Serial.print("Stop Count: ");
+    Serial.println(stopCount);
+    //intiate motor movement at our speed
+    digitalWrite(LM_DIR, true); //ccw
+    analogWrite(LM_PWM, speed);
+    while (encoderCountL > stopCount){
+      //wait until we reach or exceed desired encoder count
+      Serial.print("Encoder Count L: ");
+      Serial.println(encoderCountL);
+      delay(10); // Allow time for encoder to update
+    }
+    analogWrite(LM_PWM, 0);
+  }
+  analogWrite(LM_PWM, 0); // Stop
 }
+
+void MoveRightAbsoluteEncoder(int16_t targetCount, int speed) {
+  int stopCount = 0;
+
+  if (targetCount > 0){
+    //Current Right encoder count plus target is our new stopping count
+    stopCount = targetCount + encoderCountR;
+
+    //intiate motor movement at our speed
+    digitalWrite(RM_DIR, false); //cw
+    analogWrite(RM_PWM, speed);
+    while (encoderCountR < stopCount){
+      //wait until we reach or exceed desired encoder count
+    }
+    analogWrite(RM_PWM, 0);
+  }
+
+  if (targetCount < 0){
+    //Current Right encoder count minus target is our new stopping count
+    stopCount = encoderCountR - targetCount;
+    Serial.print("Stop Count: ");
+    Serial.println(stopCount);
+
+    //intiate motor movement at our speed
+    digitalWrite(RM_DIR, true); //ccw
+    analogWrite(RM_PWM, speed);
+    while (encoderCountR > stopCount){
+      Serial.print("Encoder Count R: ");
+      Serial.println(encoderCountR);
+      delay(10); // Allow time for encoder to update
+      //wait until we reach or exceed desired encoder count
+    }
+    analogWrite(RM_PWM, 0);
+  }
+  analogWrite(RM_PWM, 0); // Stop
+}
+
 
 int main() {
   init();
-  Serial.begin(115200);
+  Serial.begin(9600);
 
-  disableTWI();
 
   // Motor pins
   pinMode(LM_DIR, OUTPUT);
@@ -99,14 +158,24 @@ int main() {
 
   // === Example Moves ===
   while (1) {
-    // Move right motor 200 counts in the + direction (clockwise per your note)
-    moveRightToEncoderCount(HIGH, 150, 200);
-    delay(1000); // wait for 1 second
+    encoderCountL = 0;
+    encoderCountR = 0;
+    // MoveLeftAbsoluteEncoder(1000, 125);
+    // delay(500);
+    // MoveRightAbsoluteEncoder(1000, 125);
+    // delay(500);
 
-    // Example: move back 200 counts in the - direction
-    // moveRightToEncoderCount(LOW, 150, 200);
-    // delay(1000);
+    MoveLeftAbsoluteEncoder(-1000, 125);
+    delay(500);
+    MoveRightAbsoluteEncoder(-1000, 125);
+    delay(500);
+
+    // digitalWrite(LM_DIR, LOW); //ccw
+    // digitalWrite(RM_DIR, LOW); //ccw
+    // analogWrite(LM_PWM, 125);
+    // analogWrite(RM_PWM, 125);
+    // delay(1000); // Move for 1 second
+
   }
-
   return 0;
 }

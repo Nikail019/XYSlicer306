@@ -17,8 +17,8 @@ const int encoderB_L = 14; // Channel B (digital pin)
 volatile int16_t encoderCountL = 0;
 
 // === RIGHT MOTOR ===
-const int RM_DIR   = 6;    // Right Motor direction pin
-const int RM_PWM   = 7;    // Right Motor PWM pin
+const int RM_DIR   = 7;    // Right Motor direction pin
+const int RM_PWM   = 6;    // Right Motor PWM pin
 const int encoderA_R = 20; // Channel A (external interrupt pin)
 const int encoderB_R = 15; // Channel B (digital pin)
 
@@ -56,9 +56,8 @@ volatile bool hit_left = false;
 volatile bool hit_bottom = false;
 
 
-
-
 int main() {
+  init();
   Serial.begin(9600);
 
   cli();
@@ -67,13 +66,14 @@ int main() {
   TCCR1B |= (1 << CS12) | (1 << CS10);
   TCCR1B |= (1 << WGM12);  // ctc mode
   OCR1A = 3125;
-  // timer counter 3 with prescaler of 1024
-  TCCR3B |= (1 << CS32) | (1 << CS30);
-  TCCR3B |= (1 << WGM32);  // ctc mode
-  OCR3A = 3125;
+  // --- CHANGED: use timer counter 5 (instead of 3) with prescaler of 1024
+  TCCR5B |= (1 << CS52) | (1 << CS50);
+  TCCR5B |= (1 << WGM52);  // ctc mode
+  OCR5A = 3125;
 
   TIMSK1 |= (1 << OCIE1A);  // ISR on Compare Match
-  TIMSK3 |= (1 << OCIE3A);
+  // --- CHANGED: enable Timer5 compare A interrupt
+  TIMSK5 |= (1 << OCIE5A);
 
   /*LIMIT SWITCH SETUP*/
   //  TOP, RIGHT, LEFT, BOTTOM == D2, D3, D19, D18
@@ -209,9 +209,42 @@ bool checkMovementCommand() {
 }
 
 void simulateHoming() {
-  // Placeholder for homing procedure
-  Serial.println("Homing");
-  newState(IDLE);
+  Serial.println("Homing BRuv");
+
+  // Move horizontal left till LEFT switch hit — both motors CCW
+  digitalWrite(RM_DIR, LOW);
+  digitalWrite(LM_DIR, LOW);
+
+  Serial.println("Moving left to hit left limit switch...");
+  analogWrite(RM_PWM, 200);  // a bit above 100 to overcome static friction
+  analogWrite(LM_PWM, 200);  // works now because Timer3 is free for PWM
+
+  Serial.println("Waiting for left limit switch to be hit...");
+  while (!hit_left) { /* blocking wait */ }
+
+  analogWrite(RM_PWM, 0);
+  analogWrite(LM_PWM, 0);
+  Serial.println("Left limit switch hit, stopping motors.");
+  delay(1000);
+
+  // Move down till BOTTOM switch hit (Left CW, Right CCW)
+  digitalWrite(RM_DIR, HIGH);  // adjust if needed by your kinematics
+  digitalWrite(LM_DIR, LOW);
+  analogWrite(RM_PWM, 150);
+  analogWrite(LM_PWM, 153);
+
+  Serial.println("Waiting for bottom limit switch to be hit...");
+  while (!hit_bottom) { /* blocking wait */ }
+
+  analogWrite(RM_PWM, 0);
+  analogWrite(LM_PWM, 0);
+  Serial.println("Bottom limit switch hit, stopping motors.");
+
+  // Reset encoder counts
+  encoderCountL = 0;
+  encoderCountR = 0;
+
+  Serial.println("Homing complete.");
 }
 
 void simulateMovement() {
@@ -231,7 +264,7 @@ void LimitTop() {
   if (y_debounce_flag == 0) {
     reportError("Top limit switch triggered unexpectedly.");
     newState(FAULT);
-    TCNT3 = 0;
+    TCNT5 = 0;          // --- CHANGED (was TCNT3)
     hit_top = true;
     y_debounce_flag = true;
   }
@@ -261,7 +294,7 @@ void LimitBottom() {
   if (y_debounce_flag == 0) {
     reportError("Bottom limit switch triggered unexpectedly.");
     newState(FAULT);
-    TCNT3 = 0;
+    TCNT5 = 0;          // --- CHANGED (was TCNT3)
     hit_bottom = true;
     y_debounce_flag = true;
   }
@@ -269,7 +302,8 @@ void LimitBottom() {
 
 ISR(TIMER1_COMPA_vect) { x_debounce_flag = false; }
 
-ISR(TIMER3_COMPA_vect) { y_debounce_flag = false; }
+// --- CHANGED: use Timer5 compare ISR instead of Timer3
+ISR(TIMER5_COMPA_vect) { y_debounce_flag = false; }
 
 
 void getCommand(){

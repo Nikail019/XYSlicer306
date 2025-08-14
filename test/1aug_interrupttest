@@ -1,0 +1,80 @@
+#include <Arduino.h>
+#include <avr/io.h>
+#include <util/delay.h>
+#include <avr/interrupt.h>
+
+volatile bool x_debounce_flag = 0;
+volatile bool y_debounce_flag = false;
+volatile bool hit_top = false;
+volatile bool hit_right = false;
+volatile bool hit_left = false;
+volatile bool hit_bottom = false;
+
+int main(){
+  cli();
+
+  Serial.begin(9600);
+
+  // LIMIT SWITCH INTERRUPT SETUP
+  //  TOP, RIGHT, LEFT, BOTTOM == D21, D20, D19, D18
+  attachInterrupt(digitalPinToInterrupt(21), LimitTop , RISING);
+  attachInterrupt(digitalPinToInterrupt(20), LimitRight , RISING);
+  attachInterrupt(digitalPinToInterrupt(19), LimitLeft, RISING);
+  attachInterrupt(digitalPinToInterrupt(18), LimitBottom, RISING);
+  
+  // ENCODER INTERRUPT SETUP
+  // LEFT MOTOR (A1, B1), RIGHT MOTOR (A2, B2)
+  attachInterrupt(digitalPinToInterrupt(2), EncoderA1, CHANGE);
+  attachInterrupt(digitalPinToInterrupt(3), EncoderA2, CHANGE);
+  
+ // Pin Change Interrupts
+  //B1 -> D15, PJO, PCINT[10], B2 -> D69/A15, PK7, PCINT[23]
+  // B1 uses bit 1, B2 uses bit 2
+  PCICR |= (1 << PCIE1) | (1 << PCIE2);
+  PCMSK1 |= ( 1 << PCINT10); 
+  PCMSK2 |= ( 1 << PCINT23);
+  
+  sei();
+
+  while(1){
+  
+  }
+}
+
+
+ISR(PCINT1_vect){
+ // Interrupt for Encoder channel B1 
+    Serial.write("Encoder channel B1 Pin D15");
+}
+
+ISR(PCINT2_vect){
+  // Interrupt for Encoder channel B2
+   Serial.write("Encoder channel B2 Pin A15 (D69)");
+}
+
+void EncoderA1(){
+ // Interrupt for Encoder channel A1
+    Serial.write("Encoder channel A1 Pin D2");
+}
+
+void EncoderA2(){
+ // Interrupt for Encoder channel A2
+    Serial.write("Encoder channel A2 Pin D3");
+}
+
+void LimitTop(){
+    Serial.write("Top limit switch closed");
+}
+
+void LimitRight(){
+    Serial.write("Right limit switch closed");
+}
+
+void LimitLeft(){
+  Serial.write("Left limit switch closed");
+}
+
+void LimitBottom(){
+    Serial.write("Bottom limit switch closed");
+}
+

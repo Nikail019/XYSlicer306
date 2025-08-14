@@ -93,7 +93,6 @@ void moveMotorR(bool direction, int speed, int duration_ms) {
 }
 
 
-
 ISR(PCINT1_vect){
  // Interrupt for Encoder channel B1 
  E1++;

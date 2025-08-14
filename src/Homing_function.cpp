@@ -1,128 +1,154 @@
 #include <Arduino.h>
 #include <avr/interrupt.h>
-#include <avr/io.h>   // TWCR/TWEN
+#include <avr/io.h>
+#include <util/delay.h>
 
-// ====== TUNING ======
-#define Kp 5.0
-#define Ki 0.2
-#define MAX_PWM 255
-#define LOOP_MS 10
-#define TOL 2       // stop when |error| <= TOL
+// =================== MOTOR PINS ===================
+const int LM_DIR = 4;   // Left motor DIR
+const int LM_PWM = 5;   // Left motor PWM  (Timer3 PWM channel)
+const int RM_DIR = 7;   // Right motor DIR
+const int RM_PWM = 6;   // Right motor PWM (Timer4 PWM channel)
 
-// ====== PINOUTS ======
-// Left motor + encoder
-const int LM_DIR     = 4;
-const int LM_PWM     = 5;
-const int encoderA_L = 21;  // SCL (INT2)
-const int encoderB_L = 14;
+// =================== LIMIT SWITCH PINS ===================
+// TOP, RIGHT, LEFT, BOTTOM == D2, D3, D19, D18 (matches your original)
+const int SW_TOP_PIN    = 2;
+const int SW_RIGHT_PIN  = 3;
+const int SW_LEFT_PIN   = 19;
+const int SW_BOTTOM_PIN = 18;
 
-// Right motor + encoder (swapped)
-const int RM_DIR     = 7;   // dir
-const int RM_PWM     = 6;   // pwm
-const int encoderA_R = 20;  // SDA (INT3)
-const int encoderB_R = 15;
+// =================== HOMING FLAGS + DEBOUNCE ===================
+volatile bool x_debounce_flag = false;  // for RIGHT/LEFT  (Timer1)
+volatile bool y_debounce_flag = false;  // for TOP/BOTTOM (Timer5)  // <-- changed
+volatile bool hit_top    = false;
+volatile bool hit_right  = false;
+volatile bool hit_left   = false;
+volatile bool hit_bottom = false;
 
-// ====== STATE ======
+// (Only needed so we can zero them at the end, like your FSM code)
 volatile int16_t encoderCountL = 0;
 volatile int16_t encoderCountR = 0;
 
-// ====== HW HELPERS ======
-static inline void disableTWI() {
-  TWCR &= ~(1 << TWEN);   // disable I2C/TWI so 20/21 don't force pull-ups
-  pinMode(20, INPUT); pinMode(21, INPUT);
-  digitalWrite(20, LOW);  digitalWrite(21, LOW);
+// =================== LIMIT SWITCH ISRs (same logic) ===================
+void LimitTop() {
+  if (y_debounce_flag == 0) {
+    Serial.println("Top limit switch triggered.");
+    TCNT5 = 0;                 // <-- changed (was TCNT3)
+    hit_top = true;
+    y_debounce_flag = true;
+  }
 }
-
-// ====== ENCODER ISRs (simple: A rising edge, read B for dir) ======
-void EncoderISR_L() { if (digitalRead(encoderB_L)) encoderCountL++; else encoderCountL--; }
-void EncoderISR_R() { if (digitalRead(encoderB_R)) encoderCountR++; else encoderCountR--; }
-
-// ====== MOTOR DRIVE ======
-static inline void MoveLeft(bool dir, int pwm)  { digitalWrite(LM_DIR, dir?HIGH:LOW); analogWrite(LM_PWM, constrain(pwm,0,MAX_PWM)); }
-static inline void MoveRight(bool dir, int pwm) { digitalWrite(RM_DIR, dir?HIGH:LOW); analogWrite(RM_PWM, constrain(pwm,0,MAX_PWM)); }
-
-// ====== SIMPLE PI: single-motor to absolute target ======
-void moveLeftPITo(int targetCount) {
-  float I = 0;
-  while (true) {
-    int e = targetCount - encoderCountL;
-    if (abs(e) <= TOL) { analogWrite(LM_PWM, 0); break; }
-    I += e;
-    float u = Kp*e + Ki*I;
-    MoveLeft(u > 0, abs((int)u));
-    delay(LOOP_MS);
+void LimitRight() {
+  if (x_debounce_flag == 0) {
+    Serial.println("Right limit switch triggered.");
+    TCNT1 = 0;
+    hit_right = true;
+    x_debounce_flag = true;
+  }
+}
+void LimitLeft() {
+  if (x_debounce_flag == 0) {
+    Serial.println("Left limit switch triggered.");
+    TCNT1 = 0;
+    hit_left = true;
+    x_debounce_flag = true;
+  }
+}
+void LimitBottom() {
+  if (y_debounce_flag == 0) {
+    Serial.println("Bottom limit switch triggered.");
+    TCNT5 = 0;                 // <-- changed (was TCNT3)
+    hit_bottom = true;
+    y_debounce_flag = true;
   }
 }
 
-void moveRightPITo(int targetCount) {
-  float I = 0;
-  while (true) {
-    int e = targetCount - encoderCountR;
-    if (abs(e) <= TOL) { analogWrite(RM_PWM, 0); break; }
-    I += e;
-    float u = Kp*e + Ki*I;
-    MoveRight(u > 0, abs((int)u));
-    delay(LOOP_MS);
-  }
-}
+// Debounce timer ISRs (clear the gates)
+ISR(TIMER1_COMPA_vect) { x_debounce_flag = false; }  // RIGHT/LEFT debounce window done
+ISR(TIMER5_COMPA_vect) { y_debounce_flag = false; }  // TOP/BOTTOM debounce window done  // <-- changed
 
-// ====== SIMPLE PI: both motors simultaneously ======
-void moveBothPITo(int leftTarget, int rightTarget) {
-  float IL = 0, IR = 0;
-  while (true) {
-    int eL = leftTarget  - encoderCountL;
-    int eR = rightTarget - encoderCountR;
+// =================== INIT (switches + motors) ===================
 
-    bool doneL = (abs(eL) <= TOL);
-    bool doneR = (abs(eR) <= TOL);
-    if (doneL && doneR) break;
+// =================== HOMING FUNCTION (extracted) ===================
+void simulateHoming() {
+  Serial.println("Homing BRuv");
 
-    if (doneL) { analogWrite(LM_PWM, 0); }
-    else {
-      IL += eL;
-      float uL = Kp*eL + Ki*IL;
-      MoveLeft(uL > 0, abs((int)uL));
-    }
+  // Move horizontal left till LEFT switch hit — both motors CCW
+  digitalWrite(RM_DIR, LOW);
+  digitalWrite(LM_DIR, LOW);
 
-    if (doneR) { analogWrite(RM_PWM, 0); }
-    else {
-      IR += eR;
-      float uR = Kp*eR + Ki*IR;
-      MoveRight(uR > 0, abs((int)uR));
-    }
+  Serial.println("Moving left to hit left limit switch...");
+  analogWrite(RM_PWM, 200);  // a bit above 100 to overcome static friction
+  analogWrite(LM_PWM, 200);  // works now because Timer3 is free for PWM
 
-    delay(LOOP_MS);
-  }
-  analogWrite(LM_PWM, 0);
+  Serial.println("Waiting for left limit switch to be hit...");
+  while (!hit_left) { /* blocking wait */ }
+
   analogWrite(RM_PWM, 0);
+  analogWrite(LM_PWM, 0);
+  Serial.println("Left limit switch hit, stopping motors.");
+  delay(1000);
+
+  // Move down till BOTTOM switch hit (Left CW, Right CCW)
+  digitalWrite(RM_DIR, HIGH);  // adjust if needed by your kinematics
+  digitalWrite(LM_DIR, LOW);
+  analogWrite(RM_PWM, 150);
+  analogWrite(LM_PWM, 155);
+
+  Serial.println("Waiting for bottom limit switch to be hit...");
+  while (!hit_bottom) { /* blocking wait */ }
+
+  analogWrite(RM_PWM, 0);
+  analogWrite(LM_PWM, 0);
+  Serial.println("Bottom limit switch hit, stopping motors.");
+
+  // Reset encoder counts
+  encoderCountL = 0;
+  encoderCountR = 0;
+
+  Serial.println("Homing complete.");
 }
 
+// =================== MAIN ===================
 int main() {
   init();
+  Serial.begin(9600);
+   // Motor pins
+  pinMode(LM_DIR, OUTPUT);
+  pinMode(LM_PWM, OUTPUT);
+  pinMode(RM_DIR, OUTPUT);
+  pinMode(RM_PWM, OUTPUT);
 
-  // free SDA/SCL pull-ups
-  disableTWI();
+  analogWrite(LM_PWM, 0);
+  analogWrite(RM_PWM, 0);
 
-  // pins
-  pinMode(LM_DIR, OUTPUT); pinMode(LM_PWM, OUTPUT);
-  pinMode(RM_DIR, OUTPUT); pinMode(RM_PWM, OUTPUT);
-  pinMode(encoderA_L, INPUT_PULLUP); pinMode(encoderB_L, INPUT_PULLUP);
-  pinMode(encoderA_R, INPUT_PULLUP); pinMode(encoderB_R, INPUT_PULLUP);
+  // Limit switch interrupts (RISING, same as your original)
+  attachInterrupt(digitalPinToInterrupt(SW_TOP_PIN),    LimitTop,    RISING);
+  attachInterrupt(digitalPinToInterrupt(SW_RIGHT_PIN),  LimitRight,  RISING);
+  attachInterrupt(digitalPinToInterrupt(SW_LEFT_PIN),   LimitLeft,   RISING);
+  attachInterrupt(digitalPinToInterrupt(SW_BOTTOM_PIN), LimitBottom, RISING);
 
-  // interrupts on A channels (RISING like your original)
-  attachInterrupt(digitalPinToInterrupt(encoderA_L), EncoderISR_L, RISING);
-  attachInterrupt(digitalPinToInterrupt(encoderA_R), EncoderISR_R, RISING);
+  // Debounce timers:
+  // Timer1 -> X side (RIGHT/LEFT)  [unchanged]
+  cli();
+  TCCR1A = 0;
+  TCCR1B = 0;
+  TCCR1B |= (1 << WGM12);               // CTC
+  TCCR1B |= (1 << CS12) | (1 << CS10);  // prescaler 1024
+  OCR1A = 3125;                         // ~200 ms
+  TIMSK1 |= (1 << OCIE1A);              // enable compare A interrupt
 
-  // zero counts
-  encoderCountL = 0; encoderCountR = 0;
+  // Timer5 -> Y side (TOP/BOTTOM)  [moved off Timer3]  // <-- changed
+  TCCR5A = 0;
+  TCCR5B = 0;
+  TCCR5B |= (1 << WGM52);               // CTC (WGM52=1, WGM53:0=0)
+  TCCR5B |= (1 << CS52) | (1 << CS50);  // prescaler 1024
+  OCR5A = 3125;                         // ~200 ms
+  TIMSK5 |= (1 << OCIE5A);              // enable compare A interrupt
+  sei();
 
-  // ====== EXAMPLES ======
-  // Single motor:
-  // moveLeftPITo(2000);
-  // moveRightPITo(2000);
+  homingInit();
+  simulateHoming();
 
-  // Both at once to 2000 counts:
-  moveBothPITo(2000, 2000);
-
+  while (1) { /* idle */ }
   return 0;
 }
