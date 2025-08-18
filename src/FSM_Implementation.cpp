@@ -23,6 +23,15 @@ const int encoderA_R = 20; // Channel A (external interrupt pin)
 const int encoderB_R = 15; // Channel B (digital pin)
 
 volatile int16_t encoderCountR = 0;
+
+
+// motor pinout initilisation 
+
+
+
+
+
+
 // ===============================================================
 
 // =================== FSM/GCODE =================================
@@ -75,12 +84,23 @@ int main() {
   // --- CHANGED: enable Timer5 compare A interrupt
   TIMSK5 |= (1 << OCIE5A);
 
-  /*LIMIT SWITCH SETUP*/
+  /*LIMIT SWITCH SETUP*/ //Changed 
   //  TOP, RIGHT, LEFT, BOTTOM == D2, D3, D19, D18
-  attachInterrupt(digitalPinToInterrupt(2), LimitTop, RISING);
-  attachInterrupt(digitalPinToInterrupt(3), LimitRight, RISING);
-  attachInterrupt(digitalPinToInterrupt(19), LimitLeft, RISING);
-  attachInterrupt(digitalPinToInterrupt(18), LimitBottom, RISING);
+
+  //changed from RISING to CHANGE
+  attachInterrupt(digitalPinToInterrupt(2), LimitTop, CHANGE);
+  attachInterrupt(digitalPinToInterrupt(3), LimitRight, CHANGE);
+  attachInterrupt(digitalPinToInterrupt(19), LimitLeft, CHANGE);
+  attachInterrupt(digitalPinToInterrupt(18), LimitBottom, CHANGE);
+
+
+  // ================== Motor Output ============//
+  pinMode(LM_DIR, OUTPUT);
+  pinMode(LM_PWM, OUTPUT);
+  pinMode(RM_DIR, OUTPUT);
+  pinMode(RM_PWM, OUTPUT);
+
+// ============================================
   sei();
 
   newState(IDLE);  // Initally in the IDLE state
@@ -108,8 +128,8 @@ int main() {
       case FAULT:
         digitalWrite(LM_DIR, LOW);
         digitalWrite(RM_DIR, LOW);
-        digitalWrite(LM_PWM, LOW);
-        digitalWrite(RM_PWM, LOW);
+        analogWrite(LM_PWM, LOW);
+        analogWrite(RM_PWM, LOW);
         if (checkForCommand()) {
           parseErrorCommand();
         }
@@ -209,6 +229,13 @@ bool checkMovementCommand() {
 }
 
 void simulateHoming() {
+      // Reset limit flags & debounce before starting
+  hit_top = false;
+  hit_right = false;
+  hit_left = false;
+  hit_bottom = false;
+  x_debounce_flag = false;
+  y_debounce_flag = false;
   Serial.println("Homing BRuv");
 
   // Move horizontal left till LEFT switch hit — both motors CCW
@@ -235,7 +262,6 @@ void simulateHoming() {
 
   Serial.println("Waiting for bottom limit switch to be hit...");
   while (!hit_bottom) { /* blocking wait */ }
-
   analogWrite(RM_PWM, 0);
   analogWrite(LM_PWM, 0);
   Serial.println("Bottom limit switch hit, stopping motors.");
@@ -245,6 +271,7 @@ void simulateHoming() {
   encoderCountR = 0;
 
   Serial.println("Homing complete.");
+  newState(IDLE);
 }
 
 void simulateMovement() {
@@ -379,5 +406,5 @@ void Controler(float current_position, float target_position, uint16_t* integral
   *integral += error; // Update integral term
   float derivative = error - *previous_error; // Calculate derivative term
   *previous_error = error; // Update previous error
-  float output = Kp * error + Ki * (*integral) + Kd * derivative; // PID output
+  float output = Kp * error + Ki * (*integral) + Kd * derivative; // PID output need to add feed forward
 }
