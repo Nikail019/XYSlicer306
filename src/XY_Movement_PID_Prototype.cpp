@@ -53,7 +53,7 @@ static inline int sgn(long v) { return (v >= 0) ? +1 : -1; }
 
 // ==== Move function (unchanged except your debug prints) ====
 // Drives both motors simultaneously with a PWM ratio that matches distance-to-go, so both finish together.
-void moveToXY_simple(float Xmm, float Ymm, uint8_t maxPWM = 200, uint8_t MIN_PWM = 70) {
+void moveToXY_simple(float Xmm, float Ymm, uint8_t maxPWM, uint8_t MIN_PWM, uint8_t FeedRate) {
   long tgtA = DistToEncoderCounts(Xmm + Ymm); // Left motor target (CoreXY: A = X + Y)
   long tgtB = DistToEncoderCounts(Xmm - Ymm); // Right motor target (CoreXY: B = X - Y)
 
@@ -71,30 +71,70 @@ void moveToXY_simple(float Xmm, float Ymm, uint8_t maxPWM = 200, uint8_t MIN_PWM
   digitalWrite(LM_DIR, (sgn(dA) > 0) ? POS_DIR_L : (POS_DIR_L == HIGH ? LOW : HIGH));
   digitalWrite(RM_DIR, (sgn(dB) > 0) ? POS_DIR_R : (POS_DIR_R == HIGH ? LOW : HIGH));
 
+  //Pass in coordinate XY
+  float S = Xmm * Xmm + Ymm * Ymm; // S = X^2 + Y^2 (Pythagorean theorem)
+  S = sqrt(S); // Length of the move vector
+
+  // Calculate speed and time
+  float speed = S / FeedRate; // Speed in mm/s
+  float time = S / speed; // Time to complete the move in seconds
+
+  //absA and absB are the absolute values of the distances to go
+  //find rate of encoder counts per second for each motor
+  float rateA = (float)absA / time; // counts per second for left motor
+  float rateB = (float)absB / time; // counts per second for right motor
+
+
   Serial.print("Left motor direction: ");
   Serial.println((sgn(dA) > 0) ? "FORWARD" : "REVERSE");
   Serial.print("Right motor direction: ");  
   Serial.println((sgn(dB) > 0) ? "FORWARD" : "REVERSE");
 
-  // PWM ratio so both arrive together
-  uint8_t pwmA = 0, pwmB = 0; 
-  if (absA == 0) {
-    pwmA = 0;           pwmB = maxPWM;
-  } else if (absB == 0) {
-    pwmA = maxPWM;      pwmB = 0;
-  } else if (absA >= absB) {
-    pwmA = maxPWM;
-    pwmB = (uint8_t)max((int)MIN_PWM, (int)((long)maxPWM * absB / absA));
-  } else {
-    pwmB = maxPWM;
-    pwmA = (uint8_t)max((int)MIN_PWM, (int)((long)maxPWM * absA / absB));
-  }
+  // // PWM ratio so both arrive together
+  // uint8_t pwmA = 0, pwmB = 0; 
+  // if (absA == 0) {
+  //   pwmA = 0;           pwmB = maxPWM;
+  // } else if (absB == 0) {
+  //   pwmA = maxPWM;      pwmB = 0;
+  // } else if (absA >= absB) {
+  //   pwmA = maxPWM;
+  //   pwmB = (uint8_t)max((int)MIN_PWM, (int)((long)maxPWM * absB / absA));
+  // } else {
+  //   pwmB = maxPWM;
+  //   pwmA = (uint8_t)max((int)MIN_PWM, (int)((long)maxPWM * absA / absB));
+  // }
 
   // Start both motors
-  analogWrite(LM_PWM, pwmA);
-  analogWrite(RM_PWM, pwmB);
+  // analogWrite(LM_PWM, pwmA);
+  // analogWrite(RM_PWM, pwmB);
 
   // Block until both targets reached (stop each side independently when done)
+  // while (true) {
+  //   // Debug print
+  //   Serial.print("L: ");
+  //   Serial.print(encoderCountL);
+  //   Serial.print("  R: ");
+  //   Serial.print(encoderCountR);
+  //   Serial.print("  tgtA: ");
+  //   Serial.print(tgtA);
+  //   Serial.print("  tgtB: ");
+  //   Serial.println(tgtB);
+
+  //   bool Adone = ( (dA >= 0) ? (encoderCountL >= tgtA) : (encoderCountL <= tgtA) );
+  //   bool Bdone = ( (dB >= 0) ? (encoderCountR >= tgtB) : (encoderCountR <= tgtB) );
+
+  //   if (Adone && Bdone) break;
+  //   if (Adone) analogWrite(LM_PWM, 0);
+  //   if (Bdone) analogWrite(RM_PWM, 0);
+
+  //   delay(50); // keeps serial readable
+  // }
+
+  //Closed loop proportional control (implement left motor first)
+
+  //save current milis value to starttime
+  unsigned long startTime = millis();
+  uint8_t pwmA = 0, pwmB = 0;
   while (true) {
     // Debug print
     Serial.print("L: ");
@@ -106,16 +146,47 @@ void moveToXY_simple(float Xmm, float Ymm, uint8_t maxPWM = 200, uint8_t MIN_PWM
     Serial.print("  tgtB: ");
     Serial.println(tgtB);
 
+    // Check if both motors reached their targets, and enough time has passed
     bool Adone = ( (dA >= 0) ? (encoderCountL >= tgtA) : (encoderCountL <= tgtA) );
-    bool Bdone = ( (dB >= 0) ? (encoderCountR >= tgtB) : (encoderCountR <= tgtB) );
+    bool Bdone = ( (dB >= 0) ? (encoderCountR >= tgtB) : (encoderCountR <= tgtB) ); 
+    if (Adone && Bdone) {
+      Serial.println("Both motors reached their targets.");
+      break; // Exit loop if both motors are done
+    }
+    
 
-    if (Adone && Bdone) break;
-    if (Adone) analogWrite(LM_PWM, 0);
-    if (Bdone) analogWrite(RM_PWM, 0);
+    //error is the difference between current encoder count and rateA x time elapsed
+    long elapsedTime = millis() - startTime; // time elapsed in ms
+    long errorA = (long)(rateA * elapsedTime / 1000.0f) - encoderCountL; // error in counts
+    long errorB = (long)(rateB * elapsedTime / 1000.0f) - encoderCountR; // error in counts
+
+    // Calculate PWM values based on error * kP
+    // You can adjust kP to tune the response
+    float kP = 10.0f; // Proportional gain, adjust as needed
+    pwmA = (uint8_t)max(MIN_PWM, min(maxPWM, (int)(kP * errorA)));
+    pwmB = (uint8_t)max(MIN_PWM, min(maxPWM, (int)(kP * errorB)));
+
+    // Ensure PWM values are within bounds
+    pwmA = (pwmA < 0) ? 0 : pwmA; // Clamp to 0 if negative
+    pwmB = (pwmB < 0) ? 0 : pwmB; // Clamp to 0 if negative
+    pwmA = (pwmA > maxPWM) ? maxPWM : pwmA; // Clamp to maxPWM if too high
+    pwmB = (pwmB > maxPWM) ? maxPWM : pwmB;
+    Serial.print("PWM A: ");
+    Serial.print(pwmA);
+    Serial.print("  PWM B: ");
+    Serial.println(pwmB);
+
+    // Set motor directions based on sign of error
+    digitalWrite(LM_DIR, (errorA >= 0) ? POS_DIR_L : (POS_DIR_L == HIGH ? LOW : HIGH));
+    digitalWrite(RM_DIR, (errorB >= 0) ? POS_DIR_R : (POS_DIR_R == HIGH ? LOW : HIGH));
+
+   
+    // Set PWM values
+    analogWrite(LM_PWM, pwmA);
+    analogWrite(RM_PWM, pwmB);
 
     delay(50); // keeps serial readable
   }
-
   analogWrite(LM_PWM, 0);
   analogWrite(RM_PWM, 0);
 }
@@ -151,11 +222,10 @@ int main() {
 
   // Example move
   Serial.println("Moving to (100, 10) mm");
-  moveToXY_simple(100.0f, 10.0f, 200);
+  moveToXY_simple(100.0f, 10.0f, 200, 70, 100); // maxPWM, MIN_PWM, FeedRate in mm/s
 
 
-  delay(2000);
-  moveToXY_simple(50.0f, 10.0f, 200);
+  
 
   while (1) {
     // Idle

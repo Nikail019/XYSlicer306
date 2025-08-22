@@ -75,7 +75,7 @@ void MoveLeftAbsoluteEncoder(int16_t targetCount, int speed) {
   Serial.println(targetCount);
   if (targetCount < 0){
     //Current Left encoder count minus target is our new stopping count
-    stopCount = encoderCountL - targetCount;
+    stopCount = encoderCountL + targetCount;
     Serial.print("Lenc Count: ");
     Serial.println(encoderCountL);
     Serial.print("Stop Count: ");
@@ -112,7 +112,7 @@ void MoveRightAbsoluteEncoder(int16_t targetCount, int speed) {
 
   if (targetCount < 0){
     //Current Right encoder count minus target is our new stopping count
-    stopCount = encoderCountR - targetCount;
+    stopCount = encoderCountR + targetCount;
     Serial.print("Stop Count: ");
     Serial.println(stopCount);
 
@@ -142,7 +142,7 @@ int main() {
   pinMode(RM_DIR, OUTPUT);
   pinMode(RM_PWM, OUTPUT);
 
-  // Encoder pins
+  // Encoder pins   
   pinMode(encoderA_L, INPUT);
   pinMode(encoderB_L, INPUT);
   pinMode(encoderA_R, INPUT);
@@ -160,20 +160,20 @@ int main() {
   while (1) {
     encoderCountL = 0;
     encoderCountR = 0;
-    // MoveLeftAbsoluteEncoder(1000, 125);
-    // delay(500);
-    // MoveRightAbsoluteEncoder(1000, 125);
-    // delay(500);
+    MoveLeftAbsoluteEncoder(1000, 125);
+    delay(500);
+    MoveRightAbsoluteEncoder(1000, 125);
+    delay(500);
 
     MoveLeftAbsoluteEncoder(-1000, 125);
     delay(500);
     MoveRightAbsoluteEncoder(-1000, 125);
     delay(500);
 
-    // digitalWrite(LM_DIR, LOW); //ccw
-    // digitalWrite(RM_DIR, LOW); //ccw
+    // digitalWrite(LM_DIR, HIGH); //ccw
+    // // digitalWrite(RM_DIR, LOW); //ccw
     // analogWrite(LM_PWM, 125);
-    // analogWrite(RM_PWM, 125);
+    // // analogWrite(RM_PWM, 125);
     // delay(1000); // Move for 1 second
 
   }

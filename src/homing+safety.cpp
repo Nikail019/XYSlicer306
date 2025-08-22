@@ -25,13 +25,6 @@ const int encoderB_R = 15; // Channel B (digital pin)
 volatile int16_t encoderCountR = 0;
 
 
-// motor pinout initilisation 
-
-
-
-
-
-
 // ===============================================================
 
 // =================== FSM/GCODE =================================
@@ -63,6 +56,96 @@ volatile bool hit_top = false;
 volatile bool hit_right = false;
 volatile bool hit_left = false;
 volatile bool hit_bottom = false;
+
+
+// ======= TUNABLES =======
+static const int BASE_PWM   = 180;  // starting drive; set just above static friction
+static const int PWM_MIN    = 60;   // keep some torque in the slow motor
+static const int PWM_MAX    = 255;
+static const int KP_NUM     = 6;    // proportional gain (num/den) for balance
+static const int KP_DEN     = 10;   // e.g., 0.6
+
+inline int clampPWM(int v) { return v < 0 ? 0 : (v > 255 ? 255 : v); }
+
+inline bool abortIfFault(const char* where){
+  if (state == FAULT){
+    analogWrite(RM_PWM, 0); analogWrite(LM_PWM, 0);
+    Serial.print("Homing aborted due to FAULT ("); Serial.print(where); Serial.println(").");
+    return true;
+  }
+  return false;
+}
+
+// Drive with closed-loop balance where both motors spin the SAME direction.
+// We equalize the moved counts since the start of this segment.
+void driveBalancedSameDir(uint8_t pwmBase, bool dirL, bool dirR,
+                          volatile int16_t& encL, volatile int16_t& encR,
+                          int16_t startL, int16_t startR)
+{
+  digitalWrite(LM_DIR, dirL);
+  digitalWrite(RM_DIR, dirR);
+
+  // Initial equal PWM
+  int pwmL = pwmBase, pwmR = pwmBase;
+  analogWrite(LM_PWM, pwmL);
+  analogWrite(RM_PWM, pwmR);
+
+  // Balance loop iteration (call this in a while-loop body)
+  auto balanceStep = [&](void){
+    // moved counts (absolute progress since start, because direction may be LOW/HIGH)
+    int32_t movedL = (int32_t)encL - (int32_t)startL; if (movedL < 0) movedL = -movedL;
+    int32_t movedR = (int32_t)encR - (int32_t)startR; if (movedR < 0) movedR = -movedR;
+
+    int32_t err = (int32_t)movedL - (int32_t)movedR; // + => L ahead, - => R ahead
+
+    // simple P: push PWM toward the lagging side
+    pwmL = clampPWM((int)(pwmBase - (err * KP_NUM) / KP_DEN));
+    pwmR = clampPWM((int)(pwmBase + (err * KP_NUM) / KP_DEN));
+
+    // keep some minimum to avoid stalling the weaker motor
+    if (pwmL && pwmL < PWM_MIN) pwmL = PWM_MIN;
+    if (pwmR && pwmR < PWM_MIN) pwmR = PWM_MIN;
+
+    analogWrite(LM_PWM, pwmL);
+    analogWrite(RM_PWM, pwmR);
+  };
+
+  // expose inner lambda for use in loops
+  while (false) { balanceStep(); } // no-op; just here to show scope
+}
+
+// Drive with closed-loop balance where motors spin OPPOSITE directions (CoreXY Y move).
+// We equalize |moved counts| (magnitudes) since the start of this segment.
+void driveBalancedOppDir(uint8_t pwmBase, bool dirL, bool dirR,
+                         volatile int16_t& encL, volatile int16_t& encR,
+                         int16_t startL, int16_t startR)
+{
+  digitalWrite(LM_DIR, dirL);
+  digitalWrite(RM_DIR, dirR);
+
+  int pwmL = pwmBase, pwmR = pwmBase;
+  analogWrite(LM_PWM, pwmL);
+  analogWrite(RM_PWM, pwmR);
+
+  auto balanceStep = [&](void){
+    int32_t movedL = (int32_t)encL - (int32_t)startL; if (movedL < 0) movedL = -movedL;
+    int32_t movedR = (int32_t)encR - (int32_t)startR; if (movedR < 0) movedR = -movedR;
+
+    int32_t err = (int32_t)movedL - (int32_t)movedR; // + => L ahead, - => R ahead
+
+    int newL = (int)(pwmBase - (err * KP_NUM) / KP_DEN);
+    int newR = (int)(pwmBase + (err * KP_NUM) / KP_DEN);
+    newL = clampPWM(newL); newR = clampPWM(newR);
+    if (newL && newL < PWM_MIN) newL = PWM_MIN;
+    if (newR && newR < PWM_MIN) newR = PWM_MIN;
+
+    pwmL = newL; pwmR = newR;
+    analogWrite(LM_PWM, pwmL);
+    analogWrite(RM_PWM, pwmR);
+  };
+
+  while (false) { balanceStep(); }
+}
 
 
 int main() {
@@ -229,76 +312,110 @@ bool checkMovementCommand() {
 }
 
 void simulateHoming() {
-      // Reset limit flags & debounce before starting
-  hit_top = false;
-  hit_right = false;
-  hit_left = false;
-  hit_bottom = false;
-  x_debounce_flag = false;
-  y_debounce_flag = false;
+  // Reset flags before starting
+  hit_top = hit_right = hit_left = hit_bottom = false;
+  x_debounce_flag = y_debounce_flag = false;
+
   Serial.println("Homing BRuv");
 
-  // Move horizontal left till LEFT switch hit — both motors CCW
-  digitalWrite(RM_DIR, LOW);
-  digitalWrite(LM_DIR, LOW);
+  // ========= PHASE 1: Move LEFT (pure X-)
+  // We'll keep moved counts equal while waiting for LEFT switch.
+  {
+    Serial.println("Moving left to hit left limit switch...");
+    Serial.println("Balancing counts for pure X-...");
 
-  Serial.println("Moving left to hit left limit switch...");
-  analogWrite(RM_PWM, 240);  // a bit above 100 to overcome static friction
-  analogWrite(LM_PWM, 200);  // works now because Timer3 is free for PWM
+    const bool dirL = LOW; 
+    const bool dirR = LOW;
 
-  Serial.println("Waiting for left limit switch to be hit...");
-  while (!hit_left) { /* blocking wait */ }
+    int16_t startL = encoderCountL;
+    int16_t startR = encoderCountR;
 
-  analogWrite(RM_PWM, 0);
-  analogWrite(LM_PWM, 0);
-  Serial.println("Left limit switch hit, stopping motors.");
-  delay(1000);
+    // prime outputs
+    digitalWrite(LM_DIR, dirL);
+    digitalWrite(RM_DIR, dirR);
+    analogWrite(LM_PWM, BASE_PWM);
+    analogWrite(RM_PWM, BASE_PWM);
 
-  // Move down till BOTTOM switch hit (Left CW, Right CCW)
-  digitalWrite(RM_DIR, HIGH);  // adjust if needed by your kinematics
-  digitalWrite(LM_DIR, LOW);
-  analogWrite(RM_PWM, 190);
-  analogWrite(LM_PWM, 150);
+    // Wait until left limit hit or FAULT
+    while (!hit_left && state != FAULT) {
+      // Balance progress
+      int32_t movedL = (int32_t)encoderCountL - (int32_t)startL; if (movedL < 0) movedL = -movedL;
+      int32_t movedR = (int32_t)encoderCountR - (int32_t)startR; if (movedR < 0) movedR = -movedR;
+      int32_t err = movedL - movedR;
 
-  Serial.println("Waiting for bottom limit switch to be hit...");
-  while (!hit_bottom) { /* blocking wait */ }
-  analogWrite(RM_PWM, 0);
-  analogWrite(LM_PWM, 0);
-  Serial.println("Bottom limit switch hit, stopping motors.");
+      int pwmL = BASE_PWM - (int)((err * KP_NUM) / KP_DEN);
+      int pwmR = BASE_PWM + (int)((err * KP_NUM) / KP_DEN);
+      pwmL = clampPWM(pwmL); pwmR = clampPWM(pwmR);
+      if (pwmL && pwmL < PWM_MIN) pwmL = PWM_MIN;
+      if (pwmR && pwmR < PWM_MIN) pwmR = PWM_MIN;
 
-  // Reset encoder counts
+      analogWrite(LM_PWM, pwmL);
+      analogWrite(RM_PWM, pwmR);
+      delay(5);
+    }
+
+    // Abort on fault
+    if (abortIfFault("during left-seek")) return;
+
+    // Stop and small settle
+    analogWrite(LM_PWM, 0);
+    analogWrite(RM_PWM, 0);
+    Serial.println("Left limit switch hit, stopping motors.");
+    delay(150);
+  }
+
+  // ========= PHASE 2: Move DOWN (pure Y-)
+  // Keep abs moved counts equal while waiting for bottom switch.
+  {
+    Serial.println("Moving down to hit bottom limit switch...");
+    const bool dirL = LOW;  
+    const bool dirR = HIGH;
+
+    int16_t startL = encoderCountL;
+    int16_t startR = encoderCountR;
+
+    digitalWrite(LM_DIR, dirL);
+    digitalWrite(RM_DIR, dirR);
+    analogWrite(LM_PWM, BASE_PWM);
+    analogWrite(RM_PWM, BASE_PWM);
+
+    while (!hit_bottom && state != FAULT) {
+      int32_t movedL = (int32_t)encoderCountL - (int32_t)startL; if (movedL < 0) movedL = -movedL;
+      int32_t movedR = (int32_t)encoderCountR - (int32_t)startR; if (movedR < 0) movedR = -movedR;
+      int32_t err = movedL - movedR;
+
+      int pwmL = BASE_PWM - (int)((err * KP_NUM) / KP_DEN);
+      int pwmR = BASE_PWM + (int)((err * KP_NUM) / KP_DEN);
+      pwmL = clampPWM(pwmL); pwmR = clampPWM(pwmR);
+      if (pwmL && pwmL < PWM_MIN) pwmL = PWM_MIN;
+      if (pwmR && pwmR < PWM_MIN) pwmR = PWM_MIN;
+
+      analogWrite(LM_PWM, pwmL);
+      analogWrite(RM_PWM, pwmR);
+
+      delay(5);
+    }
+
+    if (abortIfFault("during bottom-seek")) return;
+
+    analogWrite(LM_PWM, 0);
+    analogWrite(RM_PWM, 0);
+    Serial.println("Bottom limit switch hit, stopping motors.");
+  }
+
+  //back off and re-home slowly using same loops.
+  // move motor 
+
+
+
+  // Zero encoders at home
   encoderCountL = 0;
   encoderCountR = 0;
-
-  // //Back off switches and home slowly
-
-  // // move HL (diaginal up) for 10mm (Rm +)
-  // digitalWrite(RM_DIR, HIGH);  
-  // analogWrite(RM_PWM, 100);
-  // delay(200);
-  //   analogWrite(RM_PWM, 0);
-  // analogWrite(LM_PWM, 0);
-
-  // //reset switches //nessasary??????
-  // hit_top = false;
-  // hit_right = false;
-  // hit_left = false;
-  // hit_bottom = false;
-  // x_debounce_flag = false;
-  // y_debounce_flag = false;
-
-  // //flip direction and home slowly till both switches hit;
-  // digitalWrite(RM_DIR, LOW);  
-  // analogWrite(RM_PWM, 100);
-  // while (!hit_bottom & !hit_left) { /* blocking wait */ }
-  // analogWrite(RM_PWM, 0);
-  // analogWrite(LM_PWM, 0);
-
-
 
   Serial.println("Homing complete.");
   newState(IDLE);
 }
+
 
 void simulateMovement() {
   // Placeholder for movement
@@ -313,28 +430,20 @@ void reportState() {
   Serial.println(state);
 }
 
-void LimitTop() {
-  if (y_debounce_flag == 0) {
-    reportError("Top limit switch triggered unexpectedly.");
-    newState(FAULT);
-    TCNT5 = 0;          // --- CHANGED (was TCNT3)
-    hit_top = true;
-    y_debounce_flag = true;
-  }
-}
+// ==================== LIMIT SWITCH ISRs ====================
 
-void LimitRight() {
-  if (x_debounce_flag == 0) {
-    reportError("Right limit switch triggered unexpectedly.");
-    newState(FAULT);
-    TCNT1 = 0;
-    hit_right = true;
-    x_debounce_flag = true;
-  }
-}
-
+// LEFT limit switch
 void LimitLeft() {
-  if (x_debounce_flag == 0) {
+  if (state == HOME) {
+    // Normal stop during homing
+    TCNT1 = 0;
+    hit_left = true;
+    x_debounce_flag = true;
+    return;
+  }
+
+  // Any other state = FAULT
+  if (!x_debounce_flag) {
     reportError("Left limit switch triggered unexpectedly.");
     newState(FAULT);
     TCNT1 = 0;
@@ -343,15 +452,61 @@ void LimitLeft() {
   }
 }
 
+// RIGHT limit switch
+void LimitRight() {
+  if (state == HOME) {
+    // Should never happen in homing
+    reportError("Right limit switch triggered during homing!");
+    newState(FAULT);
+    return;
+  }
+
+  if (!x_debounce_flag) {
+    reportError("Right limit switch triggered.");
+    newState(FAULT);
+    TCNT1 = 0;
+    hit_right = true;
+    x_debounce_flag = true;
+  }
+}
+
+// BOTTOM limit switch
 void LimitBottom() {
-  if (y_debounce_flag == 0) {
+  if (state == HOME) {
+    // Normal stop during homing
+    TCNT5 = 0;
+    hit_bottom = true;
+    y_debounce_flag = true;
+    return;
+  }
+
+  if (!y_debounce_flag) {
     reportError("Bottom limit switch triggered unexpectedly.");
     newState(FAULT);
-    TCNT5 = 0;          // --- CHANGED (was TCNT3)
+    TCNT5 = 0;
     hit_bottom = true;
     y_debounce_flag = true;
   }
 }
+
+// TOP limit switch
+void LimitTop() {
+  if (state == HOME) {
+    // Should never happen in homing
+    reportError("Top limit switch triggered during homing!");
+    newState(FAULT);
+    return;
+  }
+
+  if (!y_debounce_flag) {
+    reportError("Top limit switch triggered.");
+    newState(FAULT);
+    TCNT5 = 0;
+    hit_top = true;
+    y_debounce_flag = true;
+  }
+}
+
 
 ISR(TIMER1_COMPA_vect) { x_debounce_flag = false; }
 
@@ -422,8 +577,6 @@ uint16_t DistToEncoderCounts(float distance){
   return encoder_counts;  
 }
 
-
-
 void Controler(float current_position, float target_position, uint16_t* integral, uint16_t* previous_error) {
   uint16_t current_counts = DistToEncoderCounts(current_position);
   uint16_t target_counts = DistToEncoderCounts(target_position);
@@ -436,3 +589,5 @@ void Controler(float current_position, float target_position, uint16_t* integral
   *previous_error = error; // Update previous error
   float output = Kp * error + Ki * (*integral) + Kd * derivative; // PID output need to add feed forward
 }
+
+

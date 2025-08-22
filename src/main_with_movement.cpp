@@ -323,47 +323,90 @@
       return false;
     }
   }
+void homingInit() {
+  // Motor pins
+  pinMode(LM_DIR, OUTPUT);
+  pinMode(LM_PWM, OUTPUT);
+  pinMode(RM_DIR, OUTPUT);
+  pinMode(RM_PWM, OUTPUT);
 
+  analogWrite(LM_PWM, 0);
+  analogWrite(RM_PWM, 0);
+
+  // Limit switch interrupts (RISING, same as your original)
+  attachInterrupt(digitalPinToInterrupt(SW_TOP_PIN),    LimitTop,    RISING);
+  attachInterrupt(digitalPinToInterrupt(SW_RIGHT_PIN),  LimitRight,  RISING);
+  attachInterrupt(digitalPinToInterrupt(SW_LEFT_PIN),   LimitLeft,   RISING);
+  attachInterrupt(digitalPinToInterrupt(SW_BOTTOM_PIN), LimitBottom, RISING);
+
+  // Debounce timers:
+  // Timer1 -> X side (RIGHT/LEFT)  [unchanged]
+  cli();
+  TCCR1A = 0;
+  TCCR1B = 0;
+  TCCR1B |= (1 << WGM12);               // CTC
+  TCCR1B |= (1 << CS12) | (1 << CS10);  // prescaler 1024
+  OCR1A = 3125;                         // ~200 ms
+  TIMSK1 |= (1 << OCIE1A);              // enable compare A interrupt
+
+  // Timer5 -> Y side (TOP/BOTTOM)  [moved off Timer3]  // <-- changed
+  TCCR5A = 0;
+  TCCR5B = 0;
+  TCCR5B |= (1 << WGM52);               // CTC (WGM52=1, WGM53:0=0)
+  TCCR5B |= (1 << CS52) | (1 << CS50);  // prescaler 1024
+  OCR5A = 3125;                         // ~200 ms
+  TIMSK5 |= (1 << OCIE5A);              // enable compare A interrupt
+  sei();
+}
   void simulateHoming() {
-    // Placeholder for homing procedure
-    Serial.println("Homing BRuv");
+  Serial.println("Homing BRuv");
 
-    //homing function
-    // move horizontal left till left switch hit
-    // both motors counter clockwise
+  // Move horizontal left till LEFT switch hit — both motors CCW
+  digitalWrite(RM_DIR, LOW);
+  digitalWrite(LM_DIR, LOW);
 
-    //thingy will move left
-    digitalWrite(RM_DIR, false);
-    digitalWrite(LM_DIR, false); 
+  Serial.println("Moving left to hit left limit switch...");
+  analogWrite(RM_PWM, 200);  // a bit above 100 to overcome static friction
+  analogWrite(LM_PWM, 200);  // works now because Timer3 is free for PWM
 
-    Serial.println("Moving left to hit left limit switch...");
+  Serial.println("Waiting for left limit switch to be hit...");
+  while (!hit_left) { /* blocking wait */ }
 
-    analogWrite(RM_PWM, 100);
-    analogWrite(LM_PWM, 100);
+  analogWrite(RM_PWM, 0);
+  analogWrite(LM_PWM, 0);
+  Serial.println("Left limit switch hit, stopping motors.");
+  delay(1000);
 
-    Serial.println("Waiting for left limit switch to be hit...");
+  // Move down till BOTTOM switch hit (Left CW, Right CCW)
+  digitalWrite(RM_DIR, HIGH);  // adjust if needed by your kinematics
+  digitalWrite(LM_DIR, LOW);
+  analogWrite(RM_PWM, 150);
+  analogWrite(LM_PWM, 155);
 
-    while(!hit_left){
+  Serial.println("Waiting for bottom limit switch to be hit...");
+  while (!hit_bottom) { /* blocking wait */ }
 
-    }
-    analogWrite(RM_PWM, 0);
-    analogWrite(LM_PWM, 0);
-    Serial.println("Left limit switch hit, stopping motors.");
+  analogWrite(RM_PWM, 0);
+  analogWrite(LM_PWM, 0);
+  Serial.println("Bottom limit switch hit, stopping motors.");
 
-    //move down till bottom switch hit (Left Motor Clockwise Right Motor Counter Clockwise)
-    digitalWrite(RM_DIR, false);
-    digitalWrite(LM_DIR, true);
-    analogWrite(RM_PWM, 100);
-    analogWrite(LM_PWM, 100);
-    while(!hit_bottom){
+  // Reset encoder counts
+  encoderCountL = 0;
+  encoderCountR = 0;
 
-    } 
-    analogWrite(RM_PWM, 0);
-    analogWrite(LM_PWM, 0);
+  Serial.println("Homing complete.");
+}
 
-    //reset encoder counts
-    encoderCountL = 0;
-    encoderCountR = 0;
+// =================== MAIN ===================
+int main() {
+  init();
+  Serial.begin(9600);
+
+  homingInit();
+  simulateHoming();
+
+  while (1) { /* idle */ }
+  return 0;
     newState(IDLE);
 
   }
@@ -424,6 +467,9 @@
 
   void LimitLeft() {
     if (x_debounce_flag == 0) {
+        if(state == HOME){
+           
+        }
       reportError("Left limit switch triggered unexpectedly.");
       newState(FAULT);
       TCNT1 = 0;
@@ -434,6 +480,9 @@
 
   void LimitBottom() {
     if (y_debounce_flag == 0) {
+        if(state == HOME){
+            
+        }
       reportError("Bottom limit switch triggered unexpectedly.");
       newState(FAULT);
       TCNT3 = 0;

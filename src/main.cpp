@@ -290,12 +290,12 @@ void getG01Values(){
   char *xPtr = strchr(ptr, 'X');
   if (xPtr) {
     x = atof(xPtr + 1);
-    Xdist = (int)x; // mm
+    Xdist = EncoderCountsToDist(x); // mm
   }
   char *yPtr = strchr(ptr, 'Y');
   if (yPtr) {
     y = atof(yPtr + 1);
-    Ydist = (int)y; // mm
+    Ydist = EncoderCountsToDist(y); // mm
   }
   char *fPtr = strchr(ptr, 'F'); 
   if (fPtr) {
@@ -313,7 +313,7 @@ void getG01Values(){
 
 float EncoderCountsToDist(uint16_t encoder_counts ){
   // this function converts encoder counts to a distance in mm
-  float shaft_diameter = 12; // shaft diameter in mm
+  float shaft_diameter = 13; // shaft diameter in mm
   int cpr_before_gear_box = 12; // counts per revolution
   int gear_ratio = 172;
   int cpr_after_gear_box =  cpr_before_gear_box*gear_ratio;
@@ -325,7 +325,7 @@ float EncoderCountsToDist(uint16_t encoder_counts ){
 
 uint16_t DistToEncoderCounts(float distance){
   // this function converts a distance in mm to encoder counts
-  float shaft_diameter = 12; // shaft diameter in mm
+  float shaft_diameter = 13; // shaft diameter in mm
   int cpr_before_gear_box = 12; // counts per revolution
   int gear_ratio = 172;
   int cpr_after_gear_box =  cpr_before_gear_box*gear_ratio;
