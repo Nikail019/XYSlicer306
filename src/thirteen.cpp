@@ -170,9 +170,9 @@ int main() {
     MoveRightAbsoluteEncoder(-1000, 125);
     delay(500);
 
-    // digitalWrite(LM_DIR, HIGH); //ccw
+    digitalWrite(LM_DIR, HIGH); //ccw
     // // digitalWrite(RM_DIR, LOW); //ccw
-    // analogWrite(LM_PWM, 125);
+    analogWrite(LM_PWM, 125);
     // // analogWrite(RM_PWM, 125);
     // delay(1000); // Move for 1 second
 

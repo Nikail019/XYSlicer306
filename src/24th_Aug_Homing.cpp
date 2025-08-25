@@ -7,15 +7,7 @@
 #include <string.h>
 #include <math.h>
 
-// ======= TUNABLES =======
-static const int BASE_PWM   = 180;  // starting drive; set just above static friction
-static const int PWM_MIN    = 35;  // keep some torque in the slow motor
-static const int PWM_MAX    = 255;
-static const int KP_NUM     = 6;    // proportional gain (num/den) for balance
-static const int KP_DEN     = 10;   // e.g., 0.6
-static const int L_PWM_ADJ  = 0;    // empirical trim
-static const int R_PWM_ADJ  = 3;    // empirical trim
-
+struct VProfile;  // forward-declare so Arduino's auto-prototypes know the type
 // =================== MOTOR PINOUTS (COPIED 13/08/25) ==============
 // === LEFT MOTOR ===
 const int LM_DIR   = 4;    // Left Motor direction pin
@@ -32,7 +24,106 @@ const int encoderA_R = 20; // Channel A (external interrupt pin)
 const int encoderB_R = 15; // Channel B (digital pin)
 
 volatile int16_t encoderCountR = 0;
+// ======= TUNABLES =======
+static const int BASE_PWM   = 180;  // starting drive; set just above static friction
+static const int PWM_MIN    = 35;  // keep some torque in the slow motor
+static const int PWM_MAX    = 255;
+static const int KP_NUM     = 6;    // proportional gain (num/den) for balance
+static const int KP_DEN     = 10;   // e.g., 0.6
+static const int L_PWM_ADJ  = 0;    // empirical trim
+static const int R_PWM_ADJ  = 3;    // empirical trim
 
+// ===== Velocity-profile + per-motor P control (CoreXY) =====
+
+// Feedforward scaling & limits
+static const float MAX_V_MM_MIN   = 1000.0f;   // your maxVelocity (mm/min)
+static const float MAX_A_MM_MIN2  = 1000.0f;   // your maxSafeAcceleration (mm/min^2)
+static const int   FF_PWM_MAX     = 178;       // your maxsafePWM
+static const int   FF_PWM_MIN     = 30;        // your minsafePWM
+
+// Feedback (P) tuning
+static const float KP_PWM_PER_MM  = 6.0f;      // try 3–10; raises/reduces correction strength
+static const float STOP_EPS_MM    = 0.2f;      // how close to target to consider "done"
+static const uint16_t LOOP_DT_MS  = 10;        // control loop period (ms)
+
+
+
+// Simple CoreXY helpers
+static inline void ABToXY(float* X, float* Y, float A, float B) {
+  *X = (A + B) * 0.5f;
+  *Y = (A - B) * 0.5f;
+}
+static inline void XYToAB(float X, float Y, float* A, float* B) {
+  *A = X + Y;
+  *B = X - Y;
+}
+
+// Trapezoid/triangular profile
+struct VProfile {
+  float t_acc;  // min
+  float d_acc;  // mm
+  float d_crs;  // mm
+  float t_crs;  // min
+};
+
+// Compute profile for a straight-line move of length totalXY (mm)
+static inline VProfile GenProfileXY(float totalXY_mm, float v_cruise_mm_min, float a_mm_min2) {
+  VProfile p{};
+  const float d_min = (v_cruise_mm_min * v_cruise_mm_min) / a_mm_min2;
+  if (totalXY_mm <= 2.0f * d_min) {
+    // triangular
+    p.t_acc = sqrtf(totalXY_mm / a_mm_min2);
+    p.d_acc = 0.5f * totalXY_mm;
+    p.d_crs = 0.0f;
+    p.t_crs = 0.0f;
+  } else {
+    // trapezoidal
+    p.t_acc = v_cruise_mm_min / a_mm_min2;
+    p.d_acc = 0.5f * a_mm_min2 * p.t_acc * p.t_acc;
+    p.d_crs = totalXY_mm - 2.0f * p.d_acc;
+    p.t_crs = p.d_crs / v_cruise_mm_min;
+  }
+  return p;
+}
+
+// Scalar target speed along the path at time t (minutes)
+static inline float ProfileSpeedAt(const VProfile& p, float v_cruise, float t_min) {
+  const float slope = v_cruise / p.t_acc;
+  if (t_min < p.t_acc) {
+    return slope * t_min;
+  }
+  if (t_min > (p.t_acc + p.t_crs)) {
+    const float t_dec = t_min - p.t_acc - p.t_crs;
+    return v_cruise - slope * t_dec;
+  }
+  return v_cruise;
+}
+
+// Convenience: signed PWM write for one motor (dir + magnitude)
+static inline void driveLeft(float u_pwm_signed) {
+  int dir = (u_pwm_signed >= 0) ? HIGH : LOW;
+  int mag = (int)fabsf(u_pwm_signed);
+  if (mag > PWM_MAX) mag = PWM_MAX;      // you already have PWM_MAX=255 in your tunables
+  if (mag < 0) mag = 0;
+  digitalWrite(LM_DIR, dir);
+  analogWrite(LM_PWM, mag);
+}
+static inline void driveRight(float u_pwm_signed) {
+  int dir = (u_pwm_signed >= 0) ? HIGH : LOW;
+  int mag = (int)fabsf(u_pwm_signed);
+  if (mag > PWM_MAX) mag = PWM_MAX;
+  if (mag < 0) mag = 0;
+  digitalWrite(RM_DIR, dir);
+  analogWrite(RM_PWM, mag);
+}
+
+// Read current A/B distances (mm) relative to a given start count
+static inline void getAB_mm_fromEnc(int16_t startL, int16_t startR, float* A_mm, float* B_mm) {
+  int16_t dL = encoderCountL - startL;
+  int16_t dR = encoderCountR - startR;
+  *A_mm = EncoderCountsToDist((uint16_t)dL);
+  *B_mm = EncoderCountsToDist((uint16_t)dR);
+}
 
 // ===============================================================
 
@@ -103,6 +194,10 @@ int main() {
   attachInterrupt(digitalPinToInterrupt(3), LimitRight, CHANGE);
   attachInterrupt(digitalPinToInterrupt(19), LimitLeft, CHANGE);
   attachInterrupt(digitalPinToInterrupt(18), LimitBottom, CHANGE);
+
+  // Encoder interrupts
+  attachInterrupt(digitalPinToInterrupt(encoderA_L), EncoderISR_L, RISING);
+  attachInterrupt(digitalPinToInterrupt(encoderA_R), EncoderISR_R, RISING);
 
 
   // ================== Motor Output ============//
@@ -310,15 +405,142 @@ void simulateHoming() {
 
 
 void simulateMovement() {
-  // Placeholder for movement
-  Serial.println("Moving");
-  //move left motor at high for diagonal movement
-  digitalWrite(LM_DIR, HIGH); //ccw 
-    analogWrite(LM_PWM, 25);  
-    delay(500); //move for 0.5s
-    analogWrite(LM_PWM, 0);
-  newState(IDLE);
+  // ===== CSV header (once per move) =====
+  Serial.println(F("ms,exp_s_mm,total_mm,Vtot,VA,VB,A_mm,B_mm,L_cnt,R_cnt,PWM_A,PWM_B"));
+
+  // Uses desiredSpeed (mm/min), Xdist (mm), Ydist (mm) from parser
+  float totalXY = sqrtf((float)Xdist * Xdist + (float)Ydist * Ydist);
+  if (totalXY < 1e-3f) {
+    Serial.println("Move skipped (zero length).");
+    newState(IDLE);
+    return;
+  }
+  const float ux = (float)Xdist / totalXY;
+  const float uy = (float)Ydist / totalXY;
+
+  const float v_cruise = constrain((float)desiredSpeed, 1.0f, MAX_V_MM_MIN);
+  const float a_used   = MAX_A_MM_MIN2;
+
+  VProfile prof = GenProfileXY(totalXY, v_cruise, a_used);
+
+  Serial.println("=== MOVE BEGIN ===");
+  Serial.print("totalXY(mm): "); Serial.println(totalXY, 3);
+  Serial.print("v_cruise(mm/min): "); Serial.println(v_cruise, 2);
+  Serial.print("t_acc(min): "); Serial.println(prof.t_acc, 4);
+  Serial.print("d_acc(mm): "); Serial.println(prof.d_acc, 3);
+  Serial.print("d_crs(mm): "); Serial.println(prof.d_crs, 3);
+  Serial.print("t_crs(min): "); Serial.println(prof.t_crs, 4);
+
+  const float total_time_min = prof.t_acc + prof.t_crs + prof.t_acc;
+  const unsigned long HARD_STOP_MS =
+      (unsigned long)(total_time_min * 60000.0f) + 100UL; // +100ms guard
+
+  const unsigned long t0 = millis();
+  const int16_t L0 = encoderCountL;
+  const int16_t R0 = encoderCountR;
+
+  // expected along-track and per-motor (mm)
+  float exp_s_mm = 0.0f;
+  float expA_mm = 0.0f, expB_mm = 0.0f;
+
+  unsigned long prev_ms = t0;
+
+  // throttle serial: print every LOG_DIV control ticks
+  const uint8_t LOG_DIV = 10; // LOOP_DT_MS=10ms -> ~100ms logging
+  uint16_t log_i = 0;
+
+  while (true) {
+    if (state == FAULT) {
+      reportError("FAULT during MOVE — stopping.");
+      driveLeft(0); driveRight(0);
+      return;
+    }
+
+    const unsigned long now_ms = millis();
+    const unsigned long dt_ms  = now_ms - prev_ms;
+    prev_ms = now_ms;
+
+    const unsigned long elapsed_ms = now_ms - t0;
+    float t_min = elapsed_ms / 60000.0f;
+    if (t_min > total_time_min) t_min = total_time_min;
+
+    // scalar path speed from profile
+    const float Vtot = ProfileSpeedAt(prof, v_cruise, t_min); // mm/min
+
+    // integrate expected along-track distance (mm)
+    exp_s_mm += Vtot * (dt_ms / 60000.0f);
+    if (exp_s_mm > totalXY) exp_s_mm = totalXY;
+
+    // expected XY and CoreXY A/B (mm)
+    const float expX = ux * exp_s_mm;
+    const float expY = uy * exp_s_mm;
+    XYToAB(expX, expY, &expA_mm, &expB_mm);
+
+    // actual A/B (mm) from encoders
+    float A_mm = 0.0f, B_mm = 0.0f;
+    getAB_mm_fromEnc(L0, R0, &A_mm, &B_mm);
+
+    // target A/B velocities (mm/min) from path
+    float Vx = ux * Vtot, Vy = uy * Vtot;
+    float VA, VB; XYToAB(Vx, Vy, &VA, &VB);
+
+    // P control around signed feedforward
+    const float speed_scale = (v_cruise > 1.0f) ? fabsf(Vtot) / v_cruise : 0.0f;
+    float eA = expA_mm - A_mm;
+    float eB = expB_mm - B_mm;
+    float ffA = (VA / MAX_V_MM_MIN) * FF_PWM_MAX;   // signed
+    float ffB = (VB / MAX_V_MM_MIN) * FF_PWM_MAX;   // signed
+    float uA  = ffA + (KP_PWM_PER_MM * speed_scale) * eA;  // signed PWM cmd
+    float uB  = ffB + (KP_PWM_PER_MM * speed_scale) * eB;
+
+    auto enforce_min_when_moving = [&](float u_signed) -> float {
+      float mag = fabsf(u_signed);
+      if (fabsf(Vtot) < 1.0f) return 0.0f;  // profile says "stop" -> zero output
+      if (mag < FF_PWM_MIN) mag = FF_PWM_MIN;
+      if (mag > FF_PWM_MAX) mag = FF_PWM_MAX;
+      return (u_signed >= 0) ? mag : -mag;
+    };
+    float uA_applied = enforce_min_when_moving(uA);
+    float uB_applied = enforce_min_when_moving(uB);
+
+    // ====== SERIAL LOG (CSV) ======
+    if ((++log_i % LOG_DIV) == 0) {
+      // snapshot raw counts (non-atomic is fine for debug; optional to guard)
+      int16_t Lcnt = encoderCountL;
+      int16_t Rcnt = encoderCountR;
+
+      Serial.print(elapsed_ms);           Serial.print(',');
+      Serial.print(exp_s_mm, 3);          Serial.print(',');
+      Serial.print(totalXY, 3);           Serial.print(',');
+      Serial.print(Vtot, 2);              Serial.print(',');
+      Serial.print(VA, 2);                Serial.print(',');
+      Serial.print(VB, 2);                Serial.print(',');
+      Serial.print(A_mm, 3);              Serial.print(',');
+      Serial.print(B_mm, 3);              Serial.print(',');
+      Serial.print(Lcnt);                 Serial.print(',');
+      Serial.print(Rcnt);                 Serial.print(',');
+      Serial.print(uA_applied, 1);        Serial.print(',');
+      Serial.println(uB_applied, 1);
+    }
+
+    // stop conditions
+    const bool time_done   = (elapsed_ms >= HARD_STOP_MS);
+    const bool expect_done = ((totalXY - exp_s_mm) <= STOP_EPS_MM);
+    if (time_done || expect_done) {
+      driveLeft(0); driveRight(0);
+      Serial.println("=== MOVE COMPLETE ===");
+      newState(IDLE);
+      return;
+    }
+
+    // drive motors
+    driveLeft(uA_applied);
+    driveRight(uB_applied);
+
+    delay(LOOP_DT_MS);
+  }
 }
+
 
 void reportError(const char *errorCode) { Serial.println(errorCode); }
 
@@ -402,6 +624,17 @@ void LimitTop() {
     hit_top = true;
     y_debounce_flag = true;
   }
+}
+
+// ================== encoder ISRs =====================
+// ===== ENCODER QUADRATURE (1x on A rising, read B for direction) =====
+void EncoderISR_L() {
+  if (digitalRead(encoderB_L)) encoderCountL--;
+  else                         encoderCountL++;
+}
+void EncoderISR_R() {
+  if (digitalRead(encoderB_R)) encoderCountR--;
+  else                         encoderCountR++;
 }
 
 
