@@ -33,6 +33,10 @@ const int encoderB_R = 15; // Channel B (digital pin)
 
 volatile int16_t encoderCountR = 0;
 
+// ===== Hard limits =====
+const int x_limit_mm   = 40;   // physical limit of X axis (D19)
+const int y_limit_mm = 25;   // physical limit of Y axis (D2)
+
 
 // ===============================================================
 
@@ -180,7 +184,20 @@ void parseCommand() {
       getG01Values(); //Gets speed and X/Y distances fr
       newState(MOVE);
     }
+  } else if (commandType == MOVE) {
+  if (!checkMovementCommand()) {
+    reportError("Movement command is invalid or missing elements");
+    newState(FAULT);
+  } else {
+    if (!getG01Values()) {
+      // getG01Values() already set FAULT and printed the error.
+      // DO NOT advance the state.
+      return;
+    }
+    newState(MOVE);   // only if parsing succeeded
   }
+}
+
 }
 
 void parseErrorCommand() {
@@ -312,11 +329,9 @@ void simulateHoming() {
 void simulateMovement() {
   // Placeholder for movement
   Serial.println("Moving");
-  //move left motor at high for diagonal movement
-  digitalWrite(LM_DIR, HIGH); //ccw 
-    analogWrite(LM_PWM, 25);  
-    delay(500); //move for 0.5s
-    analogWrite(LM_PWM, 0);
+  // ===== Velocity Profile =====
+  // using trapezoidal velocity profile
+  
   newState(IDLE);
 }
 
@@ -421,7 +436,7 @@ void getCommand(){
   }
 }
 
-void getG01Values(){
+bool getG01Values(){
   // Extracts X, Y and F components of G01/G1 command and sets Xdist,Ydist and Speed to them. 
   char *ptr = (char *)commandStr;
   float x = 0, y = 0, f = 0;
@@ -429,11 +444,21 @@ void getG01Values(){
   char *xPtr = strchr(ptr, 'X');
   if (xPtr) {
     x = atof(xPtr + 1);
+    if(x > x_limit_mm){
+      reportError("X distance exceeds physical limits");
+      newState(FAULT);
+      return false;
+    }
     Xdist = (int)x; // mm
   }
   char *yPtr = strchr(ptr, 'Y');
   if (yPtr) {
     y = atof(yPtr + 1);
+    if(y > y_limit_mm){
+      reportError("Y distance exceeds physical limits");
+      newState(FAULT);
+      return false;
+    }
     Ydist = (int)y; // mm
   }
   char *fPtr = strchr(ptr, 'F'); 

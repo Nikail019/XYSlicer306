@@ -7,27 +7,36 @@
 #include <string.h>
 #include <math.h>
 
-// ======= TUNABLES =======
-static const int BASE_PWM   = 180;  // starting drive; set just above static friction
-static const int PWM_MIN    = 35;  // keep some torque in the slow motor
-static const float maxsafePWM = 178.0f;
-static const int KP_NUM     = 6;    // proportional gain (num/den) for balance
-static const int KP_DEN     = 10;   // e.g., 0.6
-static const int L_PWM_ADJ  = 0;    // empirical trim
-static const int R_PWM_ADJ  = 3;    // empirical trim
+volatile float desiredX = 0;    // enc
+volatile float desiredY = 0;       // enc
+volatile float desiredA = desiredX + desiredY;    // enc
+volatile float desiredB = desiredX - desiredY;    // enc
 
 // === A/B position references from integrating velocity (enc) =======
 volatile float ReferenceA = 0.0f;
 volatile float ReferenceB = 0.0f;
+
 // Internal integrator state (shared by RT integrator)
 static unsigned long _lastMsForRef = 0;
 static bool _havePrevV = false;
 static float _prevVA = 0.0f, _prevVB = 0.0f;
+
+// Move start time (millis)
+static unsigned long moveStartMs = 0;
+  
+// Make these float literals explicitly (no int intermediate)
 float maxSafeAcceleration = 7200000.0f;      // enc/min^2
 float maxVelocity        = 20000.0f * 60.0f;  // enc/min
-volatile long desiredSpeed = 800L * 60L;     // enc/min
+float maxsafePWM         = 178;              // raw PWM
 
-
+// ======= TUNABLES =======
+static const int BASE_PWM   = 180;  // starting drive; set just above static friction
+static const int PWM_MIN    = 35;  // keep some torque in the slow motor
+static const int PWM_MAX    = 255;
+static const int KP_NUM     = 6;    // proportional gain (num/den) for balance
+static const int KP_DEN     = 10;   // e.g., 0.6
+static const int L_PWM_ADJ  = 0;    // empirical trim
+static const int R_PWM_ADJ  = 3;    // empirical trim
 
 // =================== MOTOR PINOUTS (COPIED 13/08/25) ==============
 // === LEFT MOTOR ===
@@ -46,13 +55,24 @@ const int encoderB_R = 15; // Channel B (digital pin)
 
 volatile int16_t encoderCountR = 0;
 
+// ===== Quadrature ISR (A rising, read B for direction) =====
+void EncoderISR_L() {
+  if (digitalRead(encoderB_L)) encoderCountL--;
+  else                         encoderCountL++;
+}
+void EncoderISR_R() {
+  if (digitalRead(encoderB_R)) encoderCountR--;
+  else                         encoderCountR++;
+}
+
+
 // ===== Hard limits =====
 const int x_limit_mm   = 40;   // physical limit of X axis (D19)
 const int y_limit_mm = 25;   // physical limit of Y axis (D2)
 
 
 // ===============================================================
-static unsigned long moveStartMs = 0;
+
 // =================== FSM/GCODE =================================
 volatile int state;
 
@@ -69,22 +89,11 @@ volatile int state;
 #define INPUT_BUFFER_SIZE 64
 volatile char commandStr[INPUT_BUFFER_SIZE];
 
-//volatile long desiredSpeed = 0; // in enc/min  and long //CHANGE IN GETG01VALUES;
-volatile float desiredX = 0;    // mm
-volatile float desiredY = 0; // mm
-volatile float desiredA = 0; // mm
-volatile float desiredB = 0; // mm
-
-
+volatile long desiredSpeed = 800L * 60L;     // enc/min
+volatile int Xdist; // in mm
+volatile int Ydist; // in mm
 
 // ===============================================================
-typedef struct {
-  float t_acc;  // min
-  float d_acc;  // enc
-  float d_crs;  // enc
-  float t_crs;  // min
-} Vprofile;
-Vprofile profile;
 
 /*LIMIT SWITCH SETUP*/
 volatile bool x_debounce_flag = false;
@@ -95,7 +104,6 @@ volatile bool hit_left = false;
 volatile bool hit_bottom = false;
 
 // ===============================================================
-
 inline bool abortIfFault(const char* where){
   if (state == FAULT){
     analogWrite(RM_PWM, 0); analogWrite(LM_PWM, 0);
@@ -105,9 +113,18 @@ inline bool abortIfFault(const char* where){
   return false;
 }
 
+// ====  VELOCITY PROFILE AND CONTROL SETUP ==========================
+typedef struct {
+  float t_acc;  // min
+  float d_acc;  // enc
+  float d_crs;  // enc
+  float t_crs;  // min
+} Vprofile;
+Vprofile profile;
+
 int main() {
   init();
-  Serial.begin(9600);
+  Serial.begin(115200);
 
   cli();
   /*TIMER SETUP*/
@@ -132,6 +149,10 @@ int main() {
   attachInterrupt(digitalPinToInterrupt(3), LimitRight, CHANGE);
   attachInterrupt(digitalPinToInterrupt(19), LimitLeft, CHANGE);
   attachInterrupt(digitalPinToInterrupt(18), LimitBottom, CHANGE);
+
+  //attach encoder isrs
+    attachInterrupt(digitalPinToInterrupt(encoderA_L), EncoderISR_L, RISING);
+    attachInterrupt(digitalPinToInterrupt(encoderA_R), EncoderISR_R, RISING);
 
 
   // ================== Motor Output ============//
@@ -185,43 +206,42 @@ void newState(int ns) {
 }
 
 void parseCommand() {
-  // Used in the IDLE state to check for valid commands. Changes to
-  // corresponding state
-   getCommand();
+    // Used in the IDLE state to check for valid commands. Changes to
+    // corresponding state
+    getCommand();
 
-  int commandType = checkCommandType();
-  // Change state depending on command type
-  if (commandType == HOME) {
-    newState(HOME);
+    int commandType = checkCommandType();
+    // Change state depending on command type
+    if (commandType == HOME) {
+        newState(HOME);
+    } else if (commandType == INVALID || commandType == M999) {
+        // M999 is invalid in this state
+        reportError("Command is unrecognised or invalid");
+        newState(FAULT);
 
-  } else if (commandType == INVALID || commandType == M999) {
-    // M999 is invalid in this state
-    reportError("Command is unrecognised or invalid");
-    newState(FAULT);
-
-  } else if (commandType == MOVE) {
-    // Extra checks for validty of G01/MOVE command. Logic is missing to extract
-    // X, Y and speed from command.
-    if (!checkMovementCommand()) {
-      reportError("Movement command is invalid or missing elements");
-      newState(FAULT);
-    } else {
-      getG01Values(); //Gets speed and X/Y distances fr
-      newState(MOVE);
+    } else if (commandType == MOVE) {
+        // Extra checks for validty of G01/MOVE command. Logic is missing to extract
+        // X, Y and speed from command.
+        if (!checkMovementCommand()) {
+            reportError("Movement command is invalid or missing elements");
+            newState(FAULT);
+        } else {
+            getG01Values(); //Gets speed and X/Y distances fr
+            newState(MOVE);
+        }
+    } else if (commandType == MOVE) {
+        if (!checkMovementCommand()) {
+            reportError("Movement command is invalid or missing elements");
+            newState(FAULT);
+        } else {
+            if (!getG01Values()) {
+                // getG01Values() already set FAULT and printed the error.
+                // DO NOT advance the state.
+                return;
+            }
+            newState(MOVE);   // only if parsing succeeded
+        }
     }
-  } else if (commandType == MOVE) {
-    if (!checkMovementCommand()) {
-      reportError("Movement command is invalid or missing elements");
-      newState(FAULT);
-    } else {
-      if (!getG01Values()) {
-        // getG01Values() already set FAULT and printed the error.
-       // DO NOT advance the state.
-        return;
-      }
-      newState(MOVE);   // only if parsing succeeded
-    }
-  }
 }
 
 void parseErrorCommand() {
@@ -254,8 +274,8 @@ int checkCommandType() {
   // Checks the first block of the command for its type (G01, G28, M999) and
   // returns the related state, command (for M999) otherwise "INVALID"
   if (strstr(commandStr, "M999") != NULL ||
-      strstr(commandStr, "m999") != NULL) {
-    return M999;
+    strstr(commandStr, "m999") != NULL) {
+        return M999;
   } else if (strstr(commandStr, "G01") != NULL ||
              strstr(commandStr, "g01") != NULL ||
              strstr(commandStr, "g1") != NULL ||
@@ -353,14 +373,8 @@ void simulateHoming() {
 void simulateMovement() {
   // Placeholder for movement
   Serial.println("Moving");
-
-  //convert desiredX and desiredY to encoder counts
-  float distanceinCountsX = DistToEncoderCounts(desiredX);
-  float distanceinCountsY = DistToEncoderCounts(desiredY);
-
-  
-  Move(distanceinCountsX, distanceinCountsY);
   // ===== Velocity Profile =====
+  Move(0, -2000);  // Move 1000 mm in X direction
   // using trapezoidal velocity profile
   
   newState(IDLE);
@@ -450,11 +464,11 @@ void LimitTop() {
   }
 }
 
+
 ISR(TIMER1_COMPA_vect) { x_debounce_flag = false; }
 
 // --- CHANGED: use Timer5 compare ISR instead of Timer3
 ISR(TIMER5_COMPA_vect) { y_debounce_flag = false; }
-//=============================================================
 
 
 void getCommand(){
@@ -468,43 +482,37 @@ void getCommand(){
 }
 
 bool getG01Values(){
-  // Extracts X, Y and F components of G01/G1 command and sets desiredX,desiredY and Speed to them. 
+  // Extracts X, Y and F components of G01/G1 command and sets Xdist,Ydist and Speed to them. 
   char *ptr = (char *)commandStr;
   float x = 0, y = 0, f = 0;
   
   char *xPtr = strchr(ptr, 'X');
   if (xPtr) {
     x = atof(xPtr + 1);
-    desiredX = (int)x; // mm
+    Xdist = (int)x; // mm
   }
   char *yPtr = strchr(ptr, 'Y');
   if (yPtr) {
     y = atof(yPtr + 1);
-    desiredY = (int)y; // mm
+    Ydist = (int)y; // mm
   }
   char *fPtr = strchr(ptr, 'F'); 
   if (fPtr) {
     if(atof(fPtr + 1) != 0){ //If speed is zero or cannot be found, keep existing value
       f = atof(fPtr + 1);
-      //desiredSpeed = (long)(DistToEncoderCounts(1.0f)); // enc/min 
+    //   desiredSpeed = (int)f; // mm/min
+      //convert to enc/s
+      //desiredSpeed = (long)(f/60.0f * DistToEncoderCounts(1.0f)); // enc/s
     }
   }
-  XYToAB(desiredX, desiredY, &desiredA, &desiredB);
   // Print for test
-  Serial.print("X: "); Serial.println(desiredX);
-  Serial.print("Y: "); Serial.println(desiredY);
-  Serial.print("F: "); Serial.println(desiredSpeed);
+    Serial.print("X: "); Serial.println(desiredX);
+    Serial.print("Y: "); Serial.println(desiredY);
+    Serial.print("A: "); Serial.println(desiredA);
+    Serial.print("B: "); Serial.println(desiredB);
+    Serial.print("F: "); Serial.println(desiredSpeed);
 }
 
-// ---------- utils ----------
-void ABToXY(float* X, float* Y, float A, float B) {
-  *X = (A + B) / 2.0f;
-  *Y = (A - B) / 2.0f;
-}
-void XYToAB(float X, float Y, float* A, float* B) {
-  *A = X + Y;
-  *B = X - Y;
-}
 
 float EncoderCountsToDist(uint16_t encoder_counts ){
   // this function converts encoder counts to a distance in mm
@@ -530,17 +538,15 @@ uint16_t DistToEncoderCounts(float distance){
   return encoder_counts;  
 }
 
-void Controler(float current_position, float target_position, uint16_t* integral, uint16_t* previous_error) {
-  uint16_t current_counts = DistToEncoderCounts(current_position);
-  uint16_t target_counts = DistToEncoderCounts(target_position);
-  float error = target_counts - current_counts;
-  float Kp = 0; // Proportional gain
-  float Ki = 0; // Integral gain
-  float Kd = 0; // Derivative gain
-  *integral += error; // Update integral term
-  float derivative = error - *previous_error; // Calculate derivative term
-  *previous_error = error; // Update previous error
-  float output = Kp * error + Ki * (*integral) + Kd * derivative; // PID output need to add feed forward
+
+// ---------- references state ----------
+void ResetReferences(unsigned long now_ms) {
+  ReferenceA = 0.0f;
+  ReferenceB = 0.0f;
+  _lastMsForRef = now_ms;
+  _havePrevV = false;
+  _prevVA = 0.0f;
+  _prevVB = 0.0f;
 }
 
 void ResetEncoderCounts() {
@@ -548,23 +554,64 @@ void ResetEncoderCounts() {
   encoderCountR = 0;
 }
 
-void ResetReferences(unsigned long now_ms) {
-  ReferenceA = 0.0f;
-  ReferenceB = 0.0f;
+// Real-time (millis-driven) trapezoidal integration
+void UpdateReferenceFromVelocity_RT(unsigned long now_ms,
+                                    float vA_enc_per_min,
+                                    float vB_enc_per_min) {
+  unsigned long dms = now_ms - _lastMsForRef;
+  if (dms == 0) return;
   _lastMsForRef = now_ms;
-  _havePrevV = false;
-  _prevVA = 0.0f;
-  _prevVB = 0.0f; 
+
+  float dt_min = (float)dms / 60000.0f;
+
+  if (_havePrevV) {
+    ReferenceA += 0.5f * (vA_enc_per_min + _prevVA) * dt_min; // 
+    ReferenceB += 0.5f * (vB_enc_per_min + _prevVB) * dt_min;
+  } else {
+    ReferenceA += vA_enc_per_min * dt_min;
+    ReferenceB += vB_enc_per_min * dt_min;
+    _havePrevV = true;
+  }
+  _prevVA = vA_enc_per_min;
+  _prevVB = vB_enc_per_min;
 }
 
+
+
+// ---------- motors ----------
+void PowerMotor(int PWM_L, int PWM_R, int dir_L, int dir_R) {
+  digitalWrite(RM_DIR, dir_R);
+  digitalWrite(LM_DIR, dir_L);
+  analogWrite(RM_PWM, PWM_R);
+  analogWrite(LM_PWM, PWM_L);
+}
+
+
+void ABToXY(float* X, float* Y, float A, float B) {
+  *X = (A + B) / 2.0f;
+  *Y = (A - B) / 2.0f;
+}
+
+void XYToAB(float X, float Y, float* A, float* B) {
+  *A = X + Y;
+  *B = X - Y;
+}
+
+
+
+
+
+
+
+// ---------- move (real-time with millis) ----------
 void Move(float X, float Y) {
+    //print desired X and Y
+    Serial.print("Moving to X: "); Serial.print(X); Serial.print(" Y: "); Serial.println(Y);
     desiredX = X;
     desiredY = Y;
 
     desiredA = desiredX + desiredY;
     desiredB = desiredX - desiredY;
-
-    static unsigned long atTargetSince = 0;
 
     //PID parameters
     float Kp_left = 1.1f;   // Proportional gain for left motor
@@ -654,11 +701,11 @@ void Move(float X, float Y) {
 
     int dirA = (uA >= 0) ? HIGH : LOW;
     int dirB = (uB >= 0) ? HIGH : LOW;
-    Serial.print("============"); 
-    Serial.print(dirA);
-    Serial.print(" L  :  R "); 
-    Serial.print(dirB);
-    Serial.print("============");
+    // Serial.print("============"); 
+    // Serial.print(dirA);
+    // Serial.print(" L  :  R "); 
+    // Serial.print(dirB);
+    // Serial.print("============");
 
     // ---- effort magnitude (float), apply rounding/deadband/clamps while still float
     float magA = fabsf(uA);
@@ -685,13 +732,13 @@ void Move(float X, float Y) {
     PowerMotor(pwmA, pwmB, dirA, dirB);
 
     // ---------- Debug prints ----------
-    Serial.print("t(min): "); Serial.print(t_min, 3);
-    Serial.print(" | VA/VB: "); Serial.print(targetVA, 1); Serial.print("/"); Serial.print(targetVB, 1);
-    Serial.print(" | RefA/B: "); Serial.print(ReferenceA, 1); Serial.print("/"); Serial.print(ReferenceB, 1);
-    Serial.print(" | EncL/R: "); Serial.print(encL); Serial.print("/"); Serial.print(encR);
-    Serial.print(" | eA/eB: "); Serial.print(errorA, 1); Serial.print("/"); Serial.print(errorB, 1);
-    Serial.print(" | pwmA/B: "); Serial.print(pwmA); Serial.print("/"); Serial.println(pwmB);
-     Serial.print(t_min, 6);  Serial.print(',');
+    // Serial.print("t(min): "); Serial.print(t_min, 3);
+    // Serial.print(" | VA/VB: "); Serial.print(targetVA, 1); Serial.print("/"); Serial.print(targetVB, 1);
+    // Serial.print(" | RefA/B: "); Serial.print(ReferenceA, 1); Serial.print("/"); Serial.print(ReferenceB, 1);
+    // Serial.print(" | EncL/R: "); Serial.print(encL); Serial.print("/"); Serial.print(encR);
+    // Serial.print(" | eA/eB: "); Serial.print(errorA, 1); Serial.print("/"); Serial.print(errorB, 1);
+    // Serial.print(" | pwmA/B: "); Serial.print(pwmA); Serial.print("/"); Serial.println(pwmB);
+     //Serial.print(t_min, 6);  Serial.print(',');
     
 
     static bool csvHeader = false;
@@ -699,8 +746,6 @@ if (!csvHeader) {
   Serial.println("t_min,RefA,RefB,EncL,EncR,TargetVA,TargetVB,ActualVA,ActualVB");
   csvHeader = true;
 }
-
-
 
 // ---- actual velocity calc (enc/min) ----
 static int16_t lastEncL = 0, lastEncR = 0;
@@ -724,20 +769,20 @@ lastEncR = encR;
 
 // ---- CSV line ----
 // t_min,RefA,RefB,EncL,EncR,TargetVA,TargetVB,ActualVA,ActualVB
-// Serial.print(t_min, 6);        Serial.print(',');
-// Serial.print(ReferenceA, 3);   Serial.print(',');
-// Serial.print(ReferenceB, 3);   Serial.print(',');
-// Serial.print(encL);            Serial.print(',');
-// Serial.print(encR);            Serial.print(',');
-// Serial.print(targetVA, 3);     Serial.print(',');
-// Serial.print(targetVB, 3);     Serial.print(',');
-// Serial.print(actualVA, 3);     Serial.print(',');
-// Serial.println(actualVB, 3);
-
+Serial.print(t_min, 6);        Serial.print(',');
+Serial.print(ReferenceA, 3);   Serial.print(',');
+Serial.print(ReferenceB, 3);   Serial.print(',');
+Serial.print(encL);            Serial.print(',');
+Serial.print(encR);            Serial.print(',');
+Serial.print(targetVA, 3);     Serial.print(',');
+Serial.print(targetVB, 3);     Serial.print(',');
+Serial.print(actualVA, 3);     Serial.print(',');
+Serial.println(actualVB, 3);
+   static unsigned long atTargetSince = 0;
     // Exit when profile time is done and near the targets, and have been for a short while, based on PWM effort
     if (t_min >= totalTimeMin) {
       if (fabs(errorA) < POS_TOL && fabs(errorB) < POS_TOL) {
-        
+        //static unsigned long atTargetSince = 0;
         if (atTargetSince == 0) atTargetSince = now;
         else if ((now - atTargetSince) >= 500) { // 500 ms at target
           // stop motors
@@ -748,18 +793,7 @@ lastEncR = encR;
         atTargetSince = 0; // reset if we go out of tolerance
       }
     }
-
-
-
-
   }
-}
-
-void PowerMotor(int PWM_L, int PWM_R, int dir_L, int dir_R){
-  digitalWrite(RM_DIR, dir_R);
-  digitalWrite(LM_DIR, dir_L);
-  analogWrite(RM_PWM, PWM_R);
-  analogWrite(LM_PWM, PWM_L);
 }
 
 void GenerateVProfile() {
@@ -786,7 +820,7 @@ void GenerateVProfile() {
   }
 }
 
-
+// elapsedMin = (now - moveStartMs) / 60000.0f
 void GetTargetVelocity(float elapsedMin, float* targetVA, float* targetVB) {
   float a = maxSafeAcceleration;      // enc/min^2
   float v = (float)desiredSpeed;      // enc/min
@@ -827,23 +861,4 @@ void GetTargetVelocity(float elapsedMin, float* targetVA, float* targetVB) {
   XYToAB(Vx, Vy, targetVA, targetVB);
 }
 
-void UpdateReferenceFromVelocity_RT(unsigned long now_ms,
-                                    float vA_enc_per_min,
-                                    float vB_enc_per_min) {
-  unsigned long dms = now_ms - _lastMsForRef;
-  if (dms == 0) return;
-  _lastMsForRef = now_ms;
 
-  float dt_min = (float)dms / 60000.0f;
-
-  if (_havePrevV) {
-    ReferenceA += 0.5f * (vA_enc_per_min + _prevVA) * dt_min; // 
-    ReferenceB += 0.5f * (vB_enc_per_min + _prevVB) * dt_min;
-  } else {
-    ReferenceA += vA_enc_per_min * dt_min;
-    ReferenceB += vB_enc_per_min * dt_min;
-    _havePrevV = true;
-  }
-  _prevVA = vA_enc_per_min;
-  _prevVB = vB_enc_per_min;
-}
